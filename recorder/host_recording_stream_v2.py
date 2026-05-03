@@ -36,6 +36,8 @@ from pathlib import Path
 
 # v2cipher is imported as a sibling module (lives in recorder/ alongside us).
 sys.path.insert(0, str(Path(__file__).parent))
+# spawn_parser lives in ../replay (shared between recorder and replayer).
+sys.path.insert(0, str(Path(__file__).parent.parent / "replay"))
 try:
     import v2cipher  # type: ignore
     _V2_CIPHER_OK = True
@@ -44,6 +46,11 @@ except Exception as _e:  # pragma: no cover
     v2cipher = None  # type: ignore
     _V2_CIPHER_OK = False
     _V2_CIPHER_ERR = f"{type(_e).__name__}: {_e}"
+
+try:
+    from spawn_parser import parse_spawn_frame  # type: ignore
+except Exception:
+    parse_spawn_frame = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Hardcoded constants for the NVIDIA HOST.
@@ -210,6 +217,9 @@ class NetSniffer(threading.Thread):
         self.stop = stop_evt
         self.gate_evt = gate_evt
         self.proc: subprocess.Popen | None = None
+        # Most-recent spawn frames seen on world port (for manifest).
+        self.last_map_load: dict | None = None
+        self.last_self_spawn: dict | None = None
 
     def _spawn(self) -> subprocess.Popen:
         cmd = [self.tshark_path, "-i", self.iface, "-f", BPF,
@@ -344,12 +354,12 @@ class NetSniffer(threading.Thread):
                                 frame_hex=cipher_frame[:32].hex())
                             i += size
                             continue
-                        # body[0] is the real semantic opcode.
+                        # plain[2] is the real semantic opcode.
                         body_off = 7
                         body_end = 7 + (plain_len - 5)
                         body = plain[body_off:body_end]
-                        real_op = body[0] if body else 0
-                        op_int = int(real_op) if real_op is not None else 0
+                        real_op = plain[2] if len(plain) >= 3 else 0
+                        op_int = int(real_op)
                         self.writer.emit({
                             "kind": "net",
                             "t_mono_ns": t_mono, "t_wall_ns": t_wall,
@@ -360,6 +370,19 @@ class NetSniffer(threading.Thread):
                             "cipher": "v2_world",
                         })
                         self._maybe_open_gate(direction, port, op_int)
+                        # Spawn-frame capture (S2C only — only the server tells
+                        # us where we ended up). Keep most-recent of each kind
+                        # for the manifest's `recorded_spawn` block.
+                        if direction == "S2C" and parse_spawn_frame is not None:
+                            try:
+                                spawn = parse_spawn_frame(plain)
+                            except Exception:
+                                spawn = None
+                            if spawn is not None:
+                                if spawn["kind"] == "map_load":
+                                    self.last_map_load = spawn
+                                elif spawn["kind"] == "self_spawn":
+                                    self.last_self_spawn = spawn
                         i += size
                     consumed[key] += i
                     unconsumed = len(seg) - i
@@ -845,6 +868,27 @@ def main() -> int:
     manifest["stopped_wall_ns"] = stopped_wall
     manifest["stopped_mono_ns"] = stopped_mono
     manifest["exit_reason"] = exit_reason["value"]
+
+    # Build recorded_spawn from sniffer state. Prefer self_spawn (richer);
+    # merge map_id from map_load if both present. Omit if neither seen.
+    spawn_self = sniffer.last_self_spawn
+    spawn_map = sniffer.last_map_load
+    if spawn_self is not None:
+        rec = {
+            "map_id": spawn_map["map_id"] if spawn_map is not None else None,
+            "x": spawn_self["x"],
+            "y": spawn_self["y"],
+            "actor_id": spawn_self["actor_id"],
+            "name": spawn_self["name"],
+        }
+        manifest["recorded_spawn"] = rec
+    elif spawn_map is not None:
+        manifest["recorded_spawn"] = {
+            "map_id": spawn_map["map_id"],
+            "x": spawn_map["x"],
+            "y": spawn_map["y"],
+        }
+
     write_manifest(manifest_path, manifest)
 
     return 0

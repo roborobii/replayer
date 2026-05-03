@@ -25,6 +25,13 @@ import threading
 import time
 from typing import List, Optional
 
+# spawn_parser is a sibling module in this directory.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from spawn_parser import parse_spawn_frame  # type: ignore
+except Exception:
+    parse_spawn_frame = None  # type: ignore
+
 # When launched via pythonw.exe (no console window — needed so SendInput
 # clicks aren't stolen by a stray cmd prompt), redirect stdout/stderr to
 # a log file so the Task Scheduler launch path stays observable.
@@ -107,6 +114,8 @@ class POINT(ctypes.Structure):
 
 user32.SendInput.argtypes = [wt.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
 user32.SendInput.restype = wt.UINT
+user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, ctypes.c_void_p, ctypes.c_void_p]
+user32.PostMessageW.restype = wt.BOOL
 user32.FindWindowW.argtypes = [wt.LPCWSTR, wt.LPCWSTR]
 user32.FindWindowW.restype = wt.HWND
 user32.GetClientRect.argtypes = [wt.HWND, ctypes.POINTER(RECT)]
@@ -121,26 +130,64 @@ user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.restype = ctypes.c_int
 user32.IsWindowVisible.argtypes = [wt.HWND]
 user32.IsWindowVisible.restype = wt.BOOL
+user32.IsIconic.argtypes = [wt.HWND]
+user32.IsIconic.restype = wt.BOOL
 
 
-def find_window_by_substring(substr: str) -> Optional[int]:
-    """Find first visible top-level window whose title contains substr (case-insensitive)."""
+def _enumerate_title_matches(substr: str) -> List[int]:
+    """Return ALL top-level HWNDs whose title contains substr (case-insensitive)."""
     found: List[int] = []
     target = substr.lower()
 
     @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
     def _cb(hwnd, lparam):
-        if not user32.IsWindowVisible(hwnd):
-            return True
         buf = ctypes.create_unicode_buffer(512)
         n = user32.GetWindowTextW(hwnd, buf, 512)
         if n > 0 and target in buf.value.lower():
             found.append(hwnd)
-            return False
         return True
 
     user32.EnumWindows(_cb, 0)
-    return found[0] if found else None
+    return found
+
+
+def _hwnd_client_size(hwnd: int):
+    r = RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(r)):
+        return (0, 0)
+    return (r.right - r.left, r.bottom - r.top)
+
+
+def find_window_by_substring(substr: str) -> Optional[int]:
+    """Find first VISIBLE, non-iconic top-level window whose title contains substr,
+    with non-zero client size. Skips hidden/minimized/zero-sized matches."""
+    for hwnd in _enumerate_title_matches(substr):
+        if not user32.IsWindowVisible(hwnd):
+            continue
+        if user32.IsIconic(hwnd):
+            continue
+        cw, ch = _hwnd_client_size(hwnd)
+        if cw <= 0 or ch <= 0:
+            continue
+        return hwnd
+    return None
+
+
+def log_window_candidates(substr: str) -> None:
+    """Log all title-matching candidates to aid diagnosis when find fails."""
+    cands = _enumerate_title_matches(substr)
+    if not cands:
+        print(f"[diag] no windows match title substring '{substr}'", file=sys.stderr)
+        return
+    print(f"[diag] {len(cands)} candidate window(s) for '{substr}':", file=sys.stderr)
+    for hwnd in cands:
+        buf = ctypes.create_unicode_buffer(512)
+        user32.GetWindowTextW(hwnd, buf, 512)
+        vis = bool(user32.IsWindowVisible(hwnd))
+        ico = bool(user32.IsIconic(hwnd))
+        cw, ch = _hwnd_client_size(hwnd)
+        print(f"[diag]   hwnd=0x{hwnd:X} visible={vis} iconic={ico} "
+              f"client={cw}x{ch} title={buf.value!r}", file=sys.stderr)
 
 
 def get_window_client_rect_screen(hwnd: int):
@@ -193,6 +240,60 @@ def send_key(vk: int, up: bool):
     if n != 1:
         err = ctypes.get_last_error()
         print(f"[warn] SendInput(key) returned {n} err={err}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# PostMessage-based click delivery (alternative path).
+#
+# Avoids cursor positioning / DPI / focus issues by posting WM_*BUTTON*
+# messages directly to the target HWND using client-relative coords.
+
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
+WM_MBUTTONDOWN = 0x0207
+WM_MBUTTONUP = 0x0208
+
+MK_LBUTTON = 0x0001
+MK_RBUTTON = 0x0002
+MK_MBUTTON = 0x0010
+
+_PM_BTN_MSGS = {
+    ("L", "down"): (WM_LBUTTONDOWN, MK_LBUTTON),
+    ("L", "up"):   (WM_LBUTTONUP,   0),
+    ("R", "down"): (WM_RBUTTONDOWN, MK_RBUTTON),
+    ("R", "up"):   (WM_RBUTTONUP,   0),
+    ("M", "down"): (WM_MBUTTONDOWN, MK_MBUTTON),
+    ("M", "up"):   (WM_MBUTTONUP,   0),
+}
+
+
+def _post_message(hwnd: int, msg: int, wparam: int, lparam: int) -> None:
+    ok = user32.PostMessageW(hwnd, msg, wparam, lparam)
+    if not ok:
+        err = ctypes.get_last_error()
+        print(f"[warn] PostMessageW(hwnd=0x{hwnd:X}, msg=0x{msg:04X}) "
+              f"failed err={err}", file=sys.stderr)
+
+
+def post_click(hwnd: int, btn: str, state: str, cx: int, cy: int) -> None:
+    """Post a mouse button event via PostMessageW using client-relative px.
+
+    For "down" events, also posts a preceding WM_MOUSEMOVE so the target
+    window's hover/hit-test state is current.
+    """
+    entry = _PM_BTN_MSGS.get((btn, state))
+    if entry is None:
+        return
+    msg, mk = entry
+    cx16 = cx & 0xFFFF
+    cy16 = cy & 0xFFFF
+    lparam = (cy16 << 16) | cx16
+    if state == "down":
+        _post_message(hwnd, WM_MOUSEMOVE, 0, lparam)
+    _post_message(hwnd, msg, mk, lparam)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +427,9 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
            top_offset: int, left_offset: int,
            x_correction: int, y_correction: int,
            ctrl_addr: Optional[tuple], net_timeout: float,
-           stop_at_seq: Optional[int]) -> None:
+           stop_at_seq: Optional[int],
+           click_mode: str = "sendinput",
+           recorded_spawn: Optional[dict] = None) -> None:
     if start_idx >= len(events):
         print("[replay] no input events to play", file=sys.stderr)
         return
@@ -335,10 +438,17 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
     vs = get_virtual_screen()
     print(f"[replay] window client_rect screen=({win_x},{win_y}) size=({win_w}x{win_h})",
           file=sys.stderr)
+    if win_w <= 0 or win_h <= 0:
+        print(f"[replay] HALT: window client_rect is degenerate ({win_w}x{win_h}); "
+              f"hwnd=0x{hwnd:X} likely hidden/minimized/destroyed", file=sys.stderr)
+        return
+    _rect_refreshed = [False]
     print(f"[replay] virtual_screen={vs}", file=sys.stderr)
     print(f"[replay] vm_res=({vm_w}x{vm_h}) speed={speed} "
           f"top_off={top_offset} left_off={left_offset} "
           f"x_corr={x_correction} y_corr={y_correction}", file=sys.stderr)
+    if click_mode == "postmessage":
+        print(f"[replay] click-mode: postmessage, hwnd=0x{hwnd:X}", file=sys.stderr)
 
     # Walk ALL events (input + net) from start_idx onward in seq order.
     timeline = events[start_idx:]
@@ -356,6 +466,21 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
     ack_event = threading.Event()
     desync_info = [None]  # one-shot
 
+    # Spawn-assert state. We index world-port S2C payloads by seq so that
+    # when the control bus acks a world-port frame we can parse the spawn
+    # bytes and compare to recorded_spawn from the manifest. Asserts ONCE.
+    world_payload_by_seq: dict = {}
+    if recorded_spawn is not None and parse_spawn_frame is not None:
+        for ev in events:
+            if (ev.get("kind") == "net"
+                    and ev.get("port") == 18123
+                    and ev.get("dir") == "S2C"):
+                seq_k = ev.get("seq")
+                pay = ev.get("payload")
+                if seq_k is not None and pay:
+                    world_payload_by_seq[seq_k] = pay
+    spawn_asserted = [False]
+
     def _on_ack(obj):
         if obj.get("event") == "desync":
             desync_info[0] = obj
@@ -371,6 +496,44 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
         ack_event.set()
         print(f"[ctrl] ack seq={seq} port={obj.get('port')} dir={obj.get('dir')} "
               f"op=0x{(obj.get('opcode') or 0):02x}", file=sys.stderr)
+
+        # Spawn-assert: parse 18123 S2C payloads as they're observed,
+        # compare first spawn-bearing frame to manifest's recorded_spawn.
+        if (recorded_spawn is None or parse_spawn_frame is None
+                or spawn_asserted[0]):
+            return
+        if obj.get("port") != 18123 or obj.get("dir") != "S2C":
+            return
+        pay_hex = world_payload_by_seq.get(seq)
+        if not pay_hex:
+            return
+        try:
+            spawn = parse_spawn_frame(bytes.fromhex(pay_hex))
+        except Exception:
+            spawn = None
+        if spawn is None:
+            return
+        rec_map = recorded_spawn.get("map_id")
+        rec_x = recorded_spawn.get("x")
+        rec_y = recorded_spawn.get("y")
+        live_map = spawn.get("map_id")
+        live_x = spawn.get("x")
+        live_y = spawn.get("y")
+        # If live frame is self_spawn it has no map_id; allow rec map_id
+        # to satisfy the comparison (we still match coordinates).
+        cmp_map = live_map if live_map is not None else rec_map
+        if cmp_map == rec_map and live_x == rec_x and live_y == rec_y:
+            print(f"[spawn-assert] OK map={rec_map} spawn=({rec_x},{rec_y})",
+                  file=sys.stderr)
+            spawn_asserted[0] = True
+        else:
+            print(f"[spawn-assert] MISMATCH "
+                  f"recorded=({rec_map},{rec_x},{rec_y}) "
+                  f"live=({live_map},{live_x},{live_y})",
+                  file=sys.stderr)
+            spawn_asserted[0] = True
+            stop_flag[0] = True
+            ack_event.set()
 
     if ctrl_addr is not None:
         ctrl_thread = threading.Thread(
@@ -459,17 +622,48 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
             ax, ay = screen_to_abs(sx, sy, vs)
             send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, ax, ay)
         elif kind == "input_mouse_button":
-            sx, sy = map_coords(ev["fx"], ev["fy"], ev["cw"], ev["ch"],
-                                vm_w, vm_h, win_x, win_y, win_w, win_h,
-                                top_offset, left_offset, x_correction, y_correction)
-            ax, ay = screen_to_abs(sx, sy, vs)
-            flag = _BTN_FLAGS.get((ev.get("btn"), ev.get("state")))
-            if flag is None:
-                continue
-            print(f"[click] seq={ev.get('seq')} {ev.get('btn')}-{ev.get('state')} "
-                  f"fx={ev['fx']:.4f} fy={ev['fy']:.4f} -> screen=({sx},{sy})",
-                  file=sys.stderr)
-            send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | flag, ax, ay)
+            if not _rect_refreshed[0]:
+                try:
+                    nx, ny, nw, nh = get_window_client_rect_screen(hwnd)
+                except OSError as e:
+                    print(f"[replay] HALT: rect refresh failed before first "
+                          f"click: {e}", file=sys.stderr)
+                    return
+                if nw <= 0 or nh <= 0 or user32.IsIconic(hwnd):
+                    print(f"[replay] HALT: window degenerate before first click "
+                          f"(hwnd=0x{hwnd:X} client={nw}x{nh} "
+                          f"iconic={bool(user32.IsIconic(hwnd))})",
+                          file=sys.stderr)
+                    return
+                if (nx, ny, nw, nh) != (win_x, win_y, win_w, win_h):
+                    print(f"[replay] rect changed before first click: "
+                          f"({win_x},{win_y},{win_w}x{win_h}) -> "
+                          f"({nx},{ny},{nw}x{nh})", file=sys.stderr)
+                    win_x, win_y, win_w, win_h = nx, ny, nw, nh
+                _rect_refreshed[0] = True
+            if click_mode == "postmessage":
+                btn = ev.get("btn")
+                state = ev.get("state")
+                if (btn, state) not in _PM_BTN_MSGS:
+                    continue
+                cx = int(round(ev["fx"] * win_w))
+                cy = int(round(ev["fy"] * win_h))
+                print(f"[click] seq={ev.get('seq')} {btn}-{state} "
+                      f"fx={ev['fx']:.4f} fy={ev['fy']:.4f} -> client=({cx},{cy})",
+                      file=sys.stderr)
+                post_click(hwnd, btn, state, cx, cy)
+            else:
+                sx, sy = map_coords(ev["fx"], ev["fy"], ev["cw"], ev["ch"],
+                                    vm_w, vm_h, win_x, win_y, win_w, win_h,
+                                    top_offset, left_offset, x_correction, y_correction)
+                ax, ay = screen_to_abs(sx, sy, vs)
+                flag = _BTN_FLAGS.get((ev.get("btn"), ev.get("state")))
+                if flag is None:
+                    continue
+                print(f"[click] seq={ev.get('seq')} {ev.get('btn')}-{ev.get('state')} "
+                      f"fx={ev['fx']:.4f} fy={ev['fy']:.4f} -> screen=({sx},{sy})",
+                      file=sys.stderr)
+                send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | flag, ax, ay)
         elif kind == "input_mouse_wheel":
             sx, sy = map_coords(ev.get("fx", 0.5), ev.get("fy", 0.5),
                                 ev.get("cw", vm_w), ev.get("ch", vm_h),
@@ -525,6 +719,13 @@ def main() -> int:
                     help="stop dispatching once we pass this seq (hand off to "
                          "human for the rest). Replayer exits cleanly; emulator "
                          "keeps running so user clicks pair-match normally.")
+    ap.add_argument("--click-mode", choices=["sendinput", "postmessage"],
+                    default="sendinput",
+                    help="how to deliver mouse-button events. 'sendinput' "
+                         "(default) uses Win32 SendInput with absolute "
+                         "virtual-screen coords. 'postmessage' posts WM_*BUTTON* "
+                         "messages directly to the target HWND with "
+                         "client-relative coords (no cursor movement).")
     args = ap.parse_args()
 
     if not os.path.isfile(args.recording):
@@ -540,19 +741,29 @@ def main() -> int:
     print(f"[main] loaded {len(events)} events; vm_res=({vm_w}x{vm_h})",
           file=sys.stderr)
 
-    # Find target window with retry.
+    # Find target window with retry. We require visible + non-iconic +
+    # non-zero client rect; the launcher/in-world transition can briefly
+    # leave a same-titled hidden or 0x0 window in EnumWindows results.
     deadline = time.monotonic() + args.find_timeout
     hwnd: Optional[int] = None
     while time.monotonic() < deadline:
         hwnd = find_window_by_substring(args.window_title)
         if hwnd:
-            break
-        time.sleep(0.2)
+            cw, ch = _hwnd_client_size(hwnd)
+            if cw > 0 and ch > 0 and not user32.IsIconic(hwnd):
+                break
+            print(f"[main] hwnd=0x{hwnd:X} not ready (client={cw}x{ch} "
+                  f"iconic={bool(user32.IsIconic(hwnd))}); retrying",
+                  file=sys.stderr)
+            hwnd = None
+        time.sleep(0.5)
     if not hwnd:
-        print(f"[main] window '{args.window_title}' not found within "
+        print(f"[main] window '{args.window_title}' not usable within "
               f"{args.find_timeout}s", file=sys.stderr)
+        log_window_candidates(args.window_title)
         return 3
-    print(f"[main] target hwnd={hwnd}", file=sys.stderr)
+    cw0, ch0 = _hwnd_client_size(hwnd)
+    print(f"[main] target hwnd=0x{hwnd:X} client={cw0}x{ch0}", file=sys.stderr)
 
     start_idx = find_start_index(events, args.start_from)
     print(f"[main] start mode={args.start_from} idx={start_idx}", file=sys.stderr)
@@ -576,9 +787,57 @@ def main() -> int:
     signal.signal(signal.SIGINT, _sigint)
 
     ctrl_addr = (args.ctrl_host, args.ctrl_port) if args.ctrl_host else None
+
+    # Load recorded_spawn from manifest for the spawn-assert check.
+    recorded_spawn = manifest.get("recorded_spawn")
+    if recorded_spawn is None and parse_spawn_frame is not None:
+        # Fallback: scan the JSONL for the first 18123 S2C spawn-bearing frame.
+        first_map_load = None
+        first_self_spawn = None
+        for ev in events:
+            if (ev.get("kind") != "net" or ev.get("port") != 18123
+                    or ev.get("dir") != "S2C"):
+                continue
+            pay_hex = ev.get("payload")
+            if not pay_hex:
+                continue
+            try:
+                sp = parse_spawn_frame(bytes.fromhex(pay_hex))
+            except Exception:
+                sp = None
+            if sp is None:
+                continue
+            kind = sp.get("kind")
+            if kind == "map_load" and first_map_load is None:
+                first_map_load = sp
+            elif kind == "self_spawn" and first_self_spawn is None:
+                first_self_spawn = sp
+            if first_map_load is not None and first_self_spawn is not None:
+                break
+        if first_self_spawn is not None:
+            recorded_spawn = dict(first_self_spawn)
+            if (recorded_spawn.get("map_id") is None
+                    and first_map_load is not None):
+                recorded_spawn["map_id"] = first_map_load.get("map_id")
+        elif first_map_load is not None:
+            recorded_spawn = dict(first_map_load)
+        if recorded_spawn is not None:
+            print(f"[main] recorded_spawn auto-derived from JSONL: "
+                  f"map={recorded_spawn.get('map_id')} "
+                  f"spawn=({recorded_spawn.get('x')},{recorded_spawn.get('y')}) "
+                  f"actor={recorded_spawn.get('actor_id')} "
+                  f"name={recorded_spawn.get('name')}", file=sys.stderr)
+    if recorded_spawn is None:
+        print("[main] manifest has no recorded_spawn block and no spawn "
+              "frames found in JSONL; spawn-assert disabled", file=sys.stderr)
+    else:
+        print(f"[main] recorded_spawn={recorded_spawn}", file=sys.stderr)
+
     replay(events, start_idx, vm_w, vm_h, hwnd, args.speed, stop_flag,
            top_offset, args.left_offset, args.x_correction, args.y_correction,
-           ctrl_addr, args.net_timeout, args.stop_at_seq)
+           ctrl_addr, args.net_timeout, args.stop_at_seq,
+           click_mode=args.click_mode,
+           recorded_spawn=recorded_spawn)
     return 0
 
 

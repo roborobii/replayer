@@ -39,6 +39,22 @@ import cipher as _world_cipher
 PLAINTEXT_PORTS = {1818, 1819, 18124}
 KEEPALIVE_OP = 0x05  # 3-byte "010005" heartbeat — noise on plaintext ports.
 
+# Replay-time config; populated in main() before any handler runs.
+CFG: Dict[str, object] = {"pace": True}
+
+
+def _paced_sleep(target_ns: int, stop: Optional[threading.Event]) -> bool:
+    """Sleep until time.monotonic_ns() >= target_ns, in <=100ms chunks so a
+    stop signal isn't stuck behind a long sleep. Returns False if stopped."""
+    while True:
+        now = time.monotonic_ns()
+        dt = target_ns - now
+        if dt <= 0:
+            return True
+        if stop is not None and stop.is_set():
+            return False
+        time.sleep(min(dt, 100_000_000) / 1e9)
+
 
 def load_net_events_by_port(jsonl_path: str) -> Dict[int, List[dict]]:
     by_port: Dict[int, List[dict]] = {}
@@ -70,6 +86,7 @@ def load_net_events_by_port(jsonl_path: str) -> Dict[int, List[dict]]:
                 "len": int(ev.get("len", 0)),
                 "payload_hex": ev.get("payload", ""),
                 "cipher": cipher,
+                "t_ns": ev.get("t_mono_ns"),
             })
     return by_port
 
@@ -234,8 +251,17 @@ def _next_c2s(queue: List[dict], cursor: int):
 def _flush_s2c(sock: socket.socket, queue: List[dict], cursor: int, port: int, log,
                ctrl: "ControlBus", rewrite_ip: Optional[bytes],
                prod_ips: List[bytes]) -> int:
+    pace = bool(CFG.get("pace", True))
+    rec_t0: Optional[int] = None
+    play_t0 = time.monotonic_ns()
     while cursor < len(queue) and queue[cursor]["dir"] == "S2C":
         rec = queue[cursor]
+        if pace and rec.get("t_ns") is not None:
+            if rec_t0 is None:
+                rec_t0 = rec["t_ns"]
+            target = play_t0 + (rec["t_ns"] - rec_t0)
+            if not _paced_sleep(target, None):
+                return cursor
         try:
             payload = bytes.fromhex(rec["payload_hex"])
         except ValueError:
@@ -373,10 +399,22 @@ def handle_world_conn(sock: socket.socket, addr, port: int, queue: List[dict],
     def _push_s2c():
         # Push all recorded S2C frames in seq order. Cipher is stateless
         # per-frame, so we can re-encrypt each plaintext payload and send.
-        first_t = s2c_recs[0]["seq"] if s2c_recs else None
+        pace = bool(CFG.get("pace", True))
+        paced_recs = [r for r in s2c_recs if r.get("t_ns") is not None]
+        rec_t0 = paced_recs[0]["t_ns"] if (pace and paced_recs) else None
+        play_t0 = time.monotonic_ns()
+        rec_span_s = ((s2c_recs[-1]["t_ns"] - s2c_recs[0]["t_ns"]) / 1e9
+                      if (pace and rec_t0 is not None and s2c_recs[-1].get("t_ns")) else 0.0)
+        if pace and rec_t0 is not None:
+            log(f"[pace] world S2C: {len(s2c_recs)} frames spanning {rec_span_s:.1f}s (rec) starting playback")
+        sent = 0
         for rec in s2c_recs:
             if stop.is_set():
                 return
+            if pace and rec_t0 is not None and rec.get("t_ns") is not None:
+                target = play_t0 + (rec["t_ns"] - rec_t0)
+                if not _paced_sleep(target, stop):
+                    return
             try:
                 plain = bytes.fromhex(rec["payload_hex"])
             except ValueError:
@@ -388,7 +426,12 @@ def handle_world_conn(sock: socket.socket, addr, port: int, queue: List[dict],
                 log(f"world S2C send failed seq={rec['seq']}: {e}")
                 return
             ctrl.broadcast(rec["seq"], port, "S2C", rec["opcode"])
-        log(f"world: pushed {len(s2c_recs)} S2C frames")
+            sent += 1
+        elapsed_s = (time.monotonic_ns() - play_t0) / 1e9
+        if pace and rec_t0 is not None:
+            log(f"[pace] world S2C: pushed {sent} frames in {elapsed_s:.1f}s (rec was {rec_span_s:.1f}s)")
+        else:
+            log(f"world: pushed {sent} S2C frames")
 
     pusher = threading.Thread(target=_push_s2c, daemon=True, name=f"world-push-{port}")
     pusher.start()
@@ -490,7 +533,11 @@ def main() -> int:
     ap.add_argument("--rewrite-host", default=None,
                     help="rewrite 0xd1 server-list entries to this IPv4 (e.g. 192.168.12.148) "
                          "so client picks our emulator instead of recorded prod IPs")
+    ap.add_argument("--no-pace", action="store_true",
+                    help="disable wall-clock S2C pacing; burst all frames at line rate "
+                         "(faster iteration; default is pacing on)")
     args = ap.parse_args()
+    CFG["pace"] = not args.no_pace
 
     if not os.path.isfile(args.recording):
         print(f"recording not found: {args.recording}", file=sys.stderr)

@@ -14,6 +14,10 @@ MAC_IP       ?= 192.168.12.148
 RC3_IP       ?= 192.168.12.188
 RC3_USER     ?= RC3
 RC3          := $(RC3_USER)@$(RC3_IP)
+RC_IP        ?= 192.168.12.196
+RC_USER      ?= RC
+RC           := $(RC_USER)@$(RC_IP)
+RC_SESSIONS  := C:/Users/RC/sessions
 RECORDING_ID ?= smoke5
 TOKEN        ?= 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 PYTHON       ?= python3
@@ -21,6 +25,10 @@ PYTHON       ?= python3
 # Click-coordinate tuning (pixels in target screen). Positive Y = clicks lower.
 X_CORRECTION ?= 0
 Y_CORRECTION ?= 5
+
+# Click delivery: sendinput (default) or postmessage (no cursor move, posts
+# WM_LBUTTONDOWN/UP directly to XenClient's HWND).
+CLICK_MODE   ?= sendinput
 
 SSH          := ssh
 SCP          := scp
@@ -38,7 +46,7 @@ SESSIONS  := $(REPO_ROOT)/sessions
 JSONL     := $(SESSIONS)/recording_$(RECORDING_ID).jsonl
 
 .PHONY: help server server-bg server-stop status rc3-up deploy fullscreen \
-        run kill input input-stop replay clean-tasks
+        run kill input input-stop replay clean-tasks list-sessions pull-sessions
 
 help:
 	@echo "Phase 2 targets:"
@@ -55,20 +63,28 @@ help:
 	@echo "  input-stop   stop the input replayer task"
 	@echo "  replay       full pipeline: server-bg + deploy + fullscreen + run + sleep + input"
 	@echo "  clean-tasks  unregister scheduled tasks (xen-launch, xen-replay-input)"
+	@echo "  list-sessions   list recordings on RC ($(RC_IP))"
+	@echo "  pull-sessions   scp recording_$(RECORDING_ID).{jsonl,manifest.json} from RC -> sessions/"
 
 server:
 	@pkill -f 'v2_server.py' 2>/dev/null || true
 	$(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP)
 
 server-bg:
-	@pkill -f 'v2_server.py' 2>/dev/null || true
+	@pkill -9 -f 'v2_server.py' 2>/dev/null || true
+	@for port in 1818 1819 18123 18124; do \
+		pid=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null); \
+		[ -n "$$pid" ] && kill -9 $$pid 2>/dev/null || true; \
+	done
+	@sleep 0.5
 	@nohup $(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP) > /tmp/v2_server.log 2>&1 &
 	@sleep 1
-	@head -6 /tmp/v2_server.log
+	@head -10 /tmp/v2_server.log
+	@if grep -q 'Address already in use' /tmp/v2_server.log; then echo "[server-bg] FAIL: port already in use — see log"; exit 1; fi
 	@echo "[server-bg] tail -f /tmp/v2_server.log"
 
 server-stop:
-	@pkill -f 'v2_server.py' 2>/dev/null && echo "[server-stop] killed" || echo "[server-stop] none running"
+	@pkill -9 -f 'v2_server.py' 2>/dev/null && echo "[server-stop] killed" || echo "[server-stop] none running"
 
 status:
 	@for port in 1818 1819 18123 18124; do \
@@ -83,7 +99,7 @@ rc3-up:
 
 deploy: rc3-up
 	@test -f $(JSONL) || (echo "[deploy] missing $(JSONL)"; exit 1)
-	$(SCP) input_replayer.py play-rc3.ps1 run_input.bat schedule_input.ps1 $(RC3):replay/
+	$(SCP) input_replayer.py spawn_parser.py play-rc3.ps1 run_input.bat schedule_input.ps1 $(RC3):replay/
 	$(SCP) _tools/resize_window.ps1 _tools/window_info.ps1 $(RC3):replay/
 	$(SCP) $(SESSIONS)/recording_$(RECORDING_ID).jsonl $(RC3):replay/
 	$(SCP) $(SESSIONS)/recording_$(RECORDING_ID).manifest.json $(RC3):replay/
@@ -95,17 +111,18 @@ fullscreen:
 run: fullscreen
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$action = New-ScheduledTaskAction -Execute \"$(CLIENT_REMOTE_EXE)\" -Argument \"-I $(MAC_IP) -ID $(TOKEN)\" -WorkingDirectory \"$(CLIENT_REMOTE_DIR)\"; $$principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive; $$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 8); $$task = New-ScheduledTask -Action $$action -Principal $$principal -Settings $$settings; Register-ScheduledTask -TaskName xen-launch -InputObject $$task -Force | Out-Null; Start-ScheduledTask -TaskName xen-launch; Start-Sleep -Seconds 2; Get-Process DXRender,GLRender,XenClient -ErrorAction SilentlyContinue | Select-Object Name,Id,SessionId | Format-Table -AutoSize | Out-String; exit 0"'
 
-kill:
-	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Get-Process XenClient,DXRender,GLRender -ErrorAction SilentlyContinue | Stop-Process -Force; exit 0"'
+kill: server-stop
+	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName xen-replay-input -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-replay-input -Confirm:$$false -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-launch -Confirm:$$false -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-resize -Confirm:$$false -ErrorAction SilentlyContinue; Get-Process XenClient,DXRender,GLRender -ErrorAction SilentlyContinue | Stop-Process -Force; Get-CimInstance Win32_Process -Filter \"Name = '"'"'python.exe'"'"' OR Name = '"'"'pythonw.exe'"'"'\" | Where-Object { $$_.CommandLine -match '"'"'input_replayer'"'"' } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }; exit 0"'
+	@echo "[kill] RC3 client + input_replayer + scheduled tasks + Mac v2_server stopped"
 
 # Force the game window to exactly 1440x900 client area at (0,0) so the
 # replay frame matches the recording's vmconnect 1440x900 game area.
 # Note: requires windowed mode (FULLSCREEN=0) since fullscreen ignores MoveWindow.
 resize:
-	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$action = New-ScheduledTaskAction -Execute powershell.exe -Argument \"-NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/resize_window.ps1\" -WorkingDirectory $(REPLAY_REMOTE); $$principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive; $$task = New-ScheduledTask -Action $$action -Principal $$principal; Register-ScheduledTask -TaskName xen-resize -InputObject $$task -Force | Out-Null; Start-ScheduledTask -TaskName xen-resize; Start-Sleep -Seconds 3; Get-Content $(REPLAY_REMOTE)/resize.log -ErrorAction SilentlyContinue"'
+	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$action = New-ScheduledTaskAction -Execute powershell.exe -Argument \"-NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/resize_window.ps1\" -WorkingDirectory $(REPLAY_REMOTE); $$principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive; $$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; $$task = New-ScheduledTask -Action $$action -Principal $$principal -Settings $$settings; Register-ScheduledTask -TaskName xen-resize -InputObject $$task -Force | Out-Null; Start-ScheduledTask -TaskName xen-resize; Start-Sleep -Seconds 3; Get-Content $(REPLAY_REMOTE)/resize.log -ErrorAction SilentlyContinue"'
 
 input:
-	@$(SSH) $(RC3) 'powershell -NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/schedule_input.ps1 -RecordingId $(RECORDING_ID) -XCorrection $(X_CORRECTION) -YCorrection $(Y_CORRECTION) -CtrlHost $(MAC_IP)'
+	@$(SSH) $(RC3) 'powershell -NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/schedule_input.ps1 -RecordingId $(RECORDING_ID) -XCorrection $(X_CORRECTION) -YCorrection $(Y_CORRECTION) -CtrlHost $(MAC_IP) -ClickMode $(CLICK_MODE)'
 
 input-stop:
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName xen-replay-input -ErrorAction SilentlyContinue; exit 0"'
@@ -126,9 +143,18 @@ replay: server-bg
 auto-replay: deploy server-bg
 	@$(MAKE) run FULLSCREEN=0
 	@$(MAKE) resize
-	@echo "[auto-replay] sleeping 7s for handshake + server-select render"
-	@sleep 7
+	@echo "[auto-replay] sleeping 3s for handshake + server-select render"
+	@sleep 3
 	@$(MAKE) input
 
 clean-tasks:
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Unregister-ScheduledTask -TaskName xen-launch -Confirm:$$false -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-replay-input -Confirm:$$false -ErrorAction SilentlyContinue; exit 0"'
+
+list-sessions:
+	@$(SSH) $(RC) 'powershell -NoProfile -Command "Get-ChildItem $(RC_SESSIONS)\\recording_*.jsonl | Sort-Object LastWriteTime -Descending | Select-Object Name,@{N=\"MB\";E={[math]::Round($$_.Length/1MB,2)}},LastWriteTime | Format-Table -AutoSize"'
+
+pull-sessions:
+	@test -n "$(RECORDING_ID)" || (echo "[pull-sessions] usage: make pull-sessions RECORDING_ID=<id>"; exit 1)
+	$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).jsonl' $(SESSIONS)/
+	-$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).manifest.json' $(SESSIONS)/
+	@echo "[pull-sessions] OK: $(RECORDING_ID) -> $(SESSIONS)/"
