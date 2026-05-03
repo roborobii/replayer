@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import signal
 import struct
 import subprocess
@@ -101,6 +102,21 @@ class JsonlWriter:
             self._seq += 1
             line = json.dumps(event, separators=(",", ":"))
             self.fh.write(line + "\n")
+
+    def emit_with_patch(self, event: dict, patch_worker,
+                        hwnd: int, sx: int, sy: int) -> None:
+        """Like emit(), but allocates seq, sets event['cv_patch']=<seq>.png
+        BEFORE serialization, and enqueues the patch grab post-write so
+        the input hook returns promptly. All under a single lock acquire."""
+        with self.lock:
+            seq = self._seq
+            self._seq += 1
+            event["seq"] = seq
+            event["cv_patch"] = f"{seq}.png"
+            line = json.dumps(event, separators=(",", ":"))
+            self.fh.write(line + "\n")
+        # enqueue is non-blocking and thread-safe; outside the writer lock.
+        patch_worker.enqueue(seq, hwnd, sx, sy)
 
     def close(self) -> None:
         with self.lock:
@@ -422,6 +438,136 @@ class NetSniffer(threading.Thread):
 
 
 # ---------------------------------------------------------------------------
+# Patch-capture worker — grabs a 96x96 BGR PNG centered on each click via
+# host-level Win32 BitBlt of the vmconnect window. Runs on its own thread
+# so the input hook never blocks on GDI / disk I/O.
+
+PATCH_SIZE = 96
+PATCH_QUEUE_MAX = 1000
+
+
+class PatchCaptureWorker(threading.Thread):
+    """Single-thread fire-and-forget patch grabber.
+
+    The input hook calls enqueue(seq, hwnd, click_x_screen, click_y_screen).
+    The worker BitBlts a PATCH_SIZE x PATCH_SIZE region from the vmconnect
+    window DC centered on the click point (clamped to client bounds) and
+    saves <out_dir>/<seq>.png. If the queue exceeds PATCH_QUEUE_MAX, new
+    items are dropped (with a single warning) — recording stays alive.
+    """
+
+    def __init__(self, out_dir: Path, writer: JsonlWriter,
+                 stop_evt: threading.Event):
+        super().__init__(name="patch-capture", daemon=True)
+        self.out_dir = out_dir
+        self.writer = writer
+        self.stop = stop_evt
+        self.q: queue.Queue = queue.Queue()
+        self._dropped = 0
+        self._drop_warned = False
+        self._ok = False
+        try:
+            import win32gui  # type: ignore
+            import win32ui   # type: ignore
+            import win32con  # type: ignore
+            from PIL import Image  # type: ignore
+            self._win32gui = win32gui
+            self._win32ui = win32ui
+            self._win32con = win32con
+            self._Image = Image
+            self._ok = True
+        except Exception as e:
+            self._import_err = f"{type(e).__name__}: {e}"
+
+    def enqueue(self, seq: int, hwnd: int, sx: int, sy: int) -> None:
+        if not self._ok:
+            return
+        if self.q.qsize() >= PATCH_QUEUE_MAX:
+            self._dropped += 1
+            if not self._drop_warned:
+                self._drop_warned = True
+                m, w = _ts_pair()
+                self.writer.emit({
+                    "kind": "input_error",
+                    "t_mono_ns": m, "t_wall_ns": w,
+                    "err": f"patch-capture queue full (>{PATCH_QUEUE_MAX}); dropping",
+                })
+            return
+        self.q.put_nowait((seq, hwnd, sx, sy))
+
+    def _capture_one(self, seq: int, hwnd: int, sx: int, sy: int) -> None:
+        # sx, sy are SCREEN coords. We want the patch in the vmconnect
+        # client area; convert via ScreenToClient via GetClientRect math.
+        try:
+            cl, ct, cr, cb = self._win32gui.GetClientRect(hwnd)
+            cw, ch = cr - cl, cb - ct
+            if cw <= 0 or ch <= 0:
+                return
+            origin_x, origin_y = self._win32gui.ClientToScreen(hwnd, (0, 0))
+            cx = sx - origin_x
+            cy = sy - origin_y
+            half = PATCH_SIZE // 2
+            x0 = max(0, min(cw - PATCH_SIZE, cx - half))
+            y0 = max(0, min(ch - PATCH_SIZE, cy - half))
+            hdc_src = self._win32gui.GetWindowDC(hwnd)
+            try:
+                src_dc = self._win32ui.CreateDCFromHandle(hdc_src)
+                mem_dc = src_dc.CreateCompatibleDC()
+                bmp = self._win32ui.CreateBitmap()
+                bmp.CreateCompatibleBitmap(src_dc, PATCH_SIZE, PATCH_SIZE)
+                mem_dc.SelectObject(bmp)
+                # The window DC origin is the window (incl. non-client). For
+                # client-area capture we need to add the client offset within
+                # the window. Compute via GetWindowRect vs ClientToScreen.
+                wl, wt, wr, wb = self._win32gui.GetWindowRect(hwnd)
+                client_off_x = origin_x - wl
+                client_off_y = origin_y - wt
+                mem_dc.BitBlt(
+                    (0, 0), (PATCH_SIZE, PATCH_SIZE),
+                    src_dc,
+                    (client_off_x + x0, client_off_y + y0),
+                    self._win32con.SRCCOPY,
+                )
+                bmp_info = bmp.GetInfo()
+                bmp_str = bmp.GetBitmapBits(True)
+                img = self._Image.frombuffer(
+                    "RGB",
+                    (bmp_info["bmWidth"], bmp_info["bmHeight"]),
+                    bmp_str, "raw", "BGRX", 0, 1,
+                )
+                img.save(self.out_dir / f"{seq}.png", "PNG")
+                mem_dc.DeleteDC()
+                src_dc.DeleteDC()
+                self._win32gui.DeleteObject(bmp.GetHandle())
+            finally:
+                self._win32gui.ReleaseDC(hwnd, hdc_src)
+        except Exception as e:
+            m, w = _ts_pair()
+            self.writer.emit({
+                "kind": "input_error",
+                "t_mono_ns": m, "t_wall_ns": w,
+                "err": f"patch-capture seq={seq}: {type(e).__name__}: {e}",
+            })
+
+    def run(self) -> None:
+        if not self._ok:
+            m, w = _ts_pair()
+            self.writer.emit({
+                "kind": "input_error",
+                "t_mono_ns": m, "t_wall_ns": w,
+                "err": f"patch-capture disabled: {self._import_err}",
+            })
+            return
+        while not self.stop.is_set() or not self.q.empty():
+            try:
+                item = self.q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            seq, hwnd, sx, sy = item
+            self._capture_one(seq, hwnd, sx, sy)
+
+
+# ---------------------------------------------------------------------------
 # Input recorder (pynput LL hooks + vmconnect foreground filter)
 
 class InputRecorder:
@@ -432,10 +578,12 @@ class InputRecorder:
     """
 
     def __init__(self, writer: JsonlWriter, stop_evt: threading.Event,
-                 gate_evt: threading.Event):
+                 gate_evt: threading.Event,
+                 patch_worker: "PatchCaptureWorker | None" = None):
         self.writer = writer
         self.stop = stop_evt
         self.gate_evt = gate_evt
+        self.patch_worker = patch_worker
         # Lazy imports so the script can at least start to parse args even
         # if pynput/win32 aren't installed.
         from pynput import mouse, keyboard  # type: ignore
@@ -592,14 +740,27 @@ class InputRecorder:
         fx, fy, cw, ch, t_mono, t_wall = n
         btn = {"Button.left": "L", "Button.right": "R", "Button.middle": "M"}.get(
             str(button), str(button))
-        self.writer.emit({
+        ev = {
             "kind": "input_mouse_button",
             "t_mono_ns": t_mono, "t_wall_ns": t_wall,
             "btn": btn,
             "state": "down" if pressed else "up",
             "fx": round(fx, 5), "fy": round(fy, 5),
             "cw": cw, "ch": ch,
-        })
+        }
+        # Down events get a cv_patch sidecar (see PatchCaptureWorker). The
+        # writer allocates seq + sets cv_patch under its lock, then we
+        # fire-and-forget the BitBlt grab on the worker thread. The hook
+        # itself does NOT block on capture.
+        if pressed and self.patch_worker is not None:
+            try:
+                hwnd = int(self._win32gui.GetForegroundWindow())
+            except Exception:
+                hwnd = 0
+            if hwnd:
+                self.writer.emit_with_patch(ev, self.patch_worker, hwnd, x, y)
+                return
+        self.writer.emit(ev)
 
     def _on_scroll(self, x, y, dx, dy):
         n = self._normalize(x, y)
@@ -808,10 +969,19 @@ def main() -> int:
     sniffer = NetSniffer(str(args.iface), args.tshark, writer, stop_evt, gate_evt)
     sniffer.start()
 
+    # ---- Patch-capture worker (off-thread BitBlt of vmconnect window).
+    patches_dir = jsonl_path.parent / f"recording_{args.id}_patches"
+    patches_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[patch-capture] capturing 96x96 patches to {patches_dir}",
+          file=sys.stderr)
+    patch_worker = PatchCaptureWorker(patches_dir, writer, stop_evt)
+    patch_worker.start()
+
     # ---- Input recorder (LL hooks). Lazy-fail if pynput/pywin32 missing.
     input_rec: InputRecorder | None = None
     try:
-        input_rec = InputRecorder(writer, stop_evt, gate_evt)
+        input_rec = InputRecorder(writer, stop_evt, gate_evt,
+                                  patch_worker=patch_worker)
         input_rec.prime_initial_viewport()
         input_rec.start()
     except Exception as e:
@@ -843,6 +1013,8 @@ def main() -> int:
     if input_rec is not None:
         input_rec.stop_listeners()
     sniffer.join(timeout=5)
+    # Drain pending patches before closing the writer.
+    patch_worker.join(timeout=10)
 
     # Stop the pcap mirror.
     if pcap_proc is not None:

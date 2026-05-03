@@ -133,6 +133,118 @@ user32.IsWindowVisible.restype = wt.BOOL
 user32.IsIconic.argtypes = [wt.HWND]
 user32.IsIconic.restype = wt.BOOL
 
+# GDI for window-screenshot (CV template match).
+gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+SRCCOPY = 0x00CC0020
+
+
+# ---------------------------------------------------------------------------
+# CV template-matching (click accuracy via OpenCV)
+
+CV_MATCH_THRESHOLD = 0.85
+PATCH_SIZE = 96
+
+_cv2 = None
+_np = None
+
+
+def _load_cv2():
+    """Late-bind cv2 + numpy. Returns (cv2_module, np_module) or raises."""
+    global _cv2, _np
+    if _cv2 is not None:
+        return _cv2, _np
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+    _cv2 = cv2
+    _np = np
+    return cv2, np
+
+
+def screenshot_window(hwnd: int):
+    """Return a BGR ndarray of the target window's CLIENT area via BitBlt."""
+    cv2, np = _load_cv2()
+    sx, sy, w, h = get_window_client_rect_screen(hwnd)
+    if w <= 0 or h <= 0:
+        raise OSError(f"screenshot_window: degenerate client rect {w}x{h}")
+    user32.GetDC = ctypes.WinDLL("user32").GetDC
+    user32.GetDC.argtypes = [wt.HWND]
+    user32.GetDC.restype = ctypes.c_void_p
+    user32.ReleaseDC.argtypes = [wt.HWND, ctypes.c_void_p]
+    user32.ReleaseDC.restype = ctypes.c_int
+    gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+    gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+    gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    gdi32.CreateCompatibleBitmap.restype = ctypes.c_void_p
+    gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi32.SelectObject.restype = ctypes.c_void_p
+    gdi32.BitBlt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                             ctypes.c_int, ctypes.c_int, wt.DWORD]
+    gdi32.BitBlt.restype = wt.BOOL
+    gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+    gdi32.DeleteObject.restype = wt.BOOL
+    gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+    gdi32.DeleteDC.restype = wt.BOOL
+    gdi32.GetDIBits = ctypes.WinDLL("gdi32").GetDIBits
+    # Use desktop-DC + screen coords so we capture exactly what's displayed.
+    desk_dc = user32.GetDC(0)
+    mem_dc = gdi32.CreateCompatibleDC(desk_dc)
+    bmp = gdi32.CreateCompatibleBitmap(desk_dc, w, h)
+    gdi32.SelectObject(mem_dc, bmp)
+    gdi32.BitBlt(mem_dc, 0, 0, w, h, desk_dc, sx, sy, SRCCOPY)
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG),
+            ("biPlanes", wt.WORD), ("biBitCount", wt.WORD),
+            ("biCompression", wt.DWORD), ("biSizeImage", wt.DWORD),
+            ("biXPelsPerMeter", wt.LONG), ("biYPelsPerMeter", wt.LONG),
+            ("biClrUsed", wt.DWORD), ("biClrImportant", wt.DWORD),
+        ]
+
+    class BITMAPINFO(ctypes.Structure):
+        _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wt.DWORD * 3)]
+
+    bi = BITMAPINFO()
+    bi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+    bi.bmiHeader.biWidth = w
+    bi.bmiHeader.biHeight = -h  # top-down
+    bi.bmiHeader.biPlanes = 1
+    bi.bmiHeader.biBitCount = 32
+    bi.bmiHeader.biCompression = 0
+    buf = (ctypes.c_ubyte * (w * h * 4))()
+    gdi32.GetDIBits.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wt.UINT,
+                                wt.UINT, ctypes.c_void_p,
+                                ctypes.POINTER(BITMAPINFO), wt.UINT]
+    gdi32.GetDIBits.restype = ctypes.c_int
+    gdi32.GetDIBits(mem_dc, bmp, 0, h, buf, ctypes.byref(bi), 0)
+    gdi32.DeleteObject(bmp)
+    gdi32.DeleteDC(mem_dc)
+    user32.ReleaseDC(0, desk_dc)
+    arr = np.frombuffer(buf, dtype=np.uint8).reshape((h, w, 4))
+    return arr[:, :, :3].copy()  # BGRA -> BGR
+
+
+def cv_match_patch(hwnd: int, patch_path: str, threshold: float = CV_MATCH_THRESHOLD):
+    """Match patch against current window. Returns (ok, score, client_x, client_y).
+
+    client_x/y are CLIENT-AREA coords of the matched patch CENTER. Caller
+    converts to screen coords via the existing window math.
+    """
+    cv2, np = _load_cv2()
+    template = cv2.imread(patch_path, cv2.IMREAD_COLOR)
+    if template is None:
+        return False, 0.0, 0, 0
+    haystack = screenshot_window(hwnd)
+    th, tw = template.shape[:2]
+    if haystack.shape[0] < th or haystack.shape[1] < tw:
+        return False, 0.0, 0, 0
+    res = cv2.matchTemplate(haystack, template, cv2.TM_CCOEFF_NORMED)
+    _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(res)
+    cx = max_loc[0] + tw // 2
+    cy = max_loc[1] + th // 2
+    return (max_val >= threshold), float(max_val), int(cx), int(cy)
+
 
 def _enumerate_title_matches(substr: str) -> List[int]:
     """Return ALL top-level HWNDs whose title contains substr (case-insensitive)."""
@@ -429,7 +541,8 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
            ctrl_addr: Optional[tuple], net_timeout: float,
            stop_at_seq: Optional[int],
            click_mode: str = "sendinput",
-           recorded_spawn: Optional[dict] = None) -> None:
+           recorded_spawn: Optional[dict] = None,
+           patches_dir: Optional[str] = None) -> None:
     if start_idx >= len(events):
         print("[replay] no input events to play", file=sys.stderr)
         return
@@ -641,21 +754,55 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
                           f"({nx},{ny},{nw}x{nh})", file=sys.stderr)
                     win_x, win_y, win_w, win_h = nx, ny, nw, nh
                 _rect_refreshed[0] = True
+            # CV template-match: if recording bundled patches and this event
+            # carries a cv_patch (down events only), match the patch against
+            # the live window and use the match center for the click target.
+            cv_client_xy = None  # (cx, cy) in client px, or None
+            cv_patch_name = ev.get("cv_patch")
+            if patches_dir and cv_patch_name and ev.get("state") == "down":
+                patch_path = os.path.join(patches_dir, cv_patch_name)
+                if os.path.isfile(patch_path):
+                    ok, score, mcx, mcy = cv_match_patch(hwnd, patch_path)
+                    rec_cx = int(round(ev["fx"] * win_w))
+                    rec_cy = int(round(ev["fy"] * win_h))
+                    if ok:
+                        dx = mcx - rec_cx
+                        dy = mcy - rec_cy
+                        print(f"[cv-match] OK seq={ev.get('seq')} "
+                              f"score={score:.2f} shift=({dx},{dy})",
+                              file=sys.stderr)
+                        cv_client_xy = (mcx, mcy)
+                    else:
+                        print(f"[cv-match] FAIL seq={ev.get('seq')} "
+                              f"score={score:.2f} recorded=({rec_cx},{rec_cy})",
+                              file=sys.stderr)
+                        stop_flag[0] = True
+                        return
             if click_mode == "postmessage":
                 btn = ev.get("btn")
                 state = ev.get("state")
                 if (btn, state) not in _PM_BTN_MSGS:
                     continue
-                cx = int(round(ev["fx"] * win_w))
-                cy = int(round(ev["fy"] * win_h))
+                if cv_client_xy is not None:
+                    cx, cy = cv_client_xy
+                    cy += y_correction
+                    cx += x_correction
+                else:
+                    cx = int(round(ev["fx"] * win_w))
+                    cy = int(round(ev["fy"] * win_h))
                 print(f"[click] seq={ev.get('seq')} {btn}-{state} "
                       f"fx={ev['fx']:.4f} fy={ev['fy']:.4f} -> client=({cx},{cy})",
                       file=sys.stderr)
                 post_click(hwnd, btn, state, cx, cy)
             else:
-                sx, sy = map_coords(ev["fx"], ev["fy"], ev["cw"], ev["ch"],
-                                    vm_w, vm_h, win_x, win_y, win_w, win_h,
-                                    top_offset, left_offset, x_correction, y_correction)
+                if cv_client_xy is not None:
+                    cx, cy = cv_client_xy
+                    sx = win_x + cx + x_correction
+                    sy = win_y + cy + y_correction
+                else:
+                    sx, sy = map_coords(ev["fx"], ev["fy"], ev["cw"], ev["ch"],
+                                        vm_w, vm_h, win_x, win_y, win_w, win_h,
+                                        top_offset, left_offset, x_correction, y_correction)
                 ax, ay = screen_to_abs(sx, sy, vs)
                 flag = _BTN_FLAGS.get((ev.get("btn"), ev.get("state")))
                 if flag is None:
@@ -731,6 +878,24 @@ def main() -> int:
     if not os.path.isfile(args.recording):
         print(f"recording not found: {args.recording}", file=sys.stderr)
         return 2
+
+    # CV template-match mode: derive patches dir from recording filename.
+    # `recording_<id>.jsonl` -> `recording_<id>_patches/` in same dir.
+    rec_base, _ = os.path.splitext(args.recording)
+    patches_dir = rec_base + "_patches"
+    if os.path.isdir(patches_dir):
+        try:
+            _load_cv2()
+        except ImportError as e:
+            print(f"[main] HALT: cv2 required for template-match (recording "
+                  f"has patches dir {patches_dir}). pip install opencv-python "
+                  f"on RC3. import error: {e}", file=sys.stderr)
+            return 4
+        print(f"[main] CV mode ON: patches dir {patches_dir}", file=sys.stderr)
+    else:
+        print(f"[main] CV mode OFF: no patches dir at {patches_dir} "
+              f"(coordinate-only clicks)", file=sys.stderr)
+        patches_dir = None
 
     events = load_jsonl(args.recording)
     manifest = load_manifest(args.recording)
@@ -837,7 +1002,8 @@ def main() -> int:
            top_offset, args.left_offset, args.x_correction, args.y_correction,
            ctrl_addr, args.net_timeout, args.stop_at_seq,
            click_mode=args.click_mode,
-           recorded_spawn=recorded_spawn)
+           recorded_spawn=recorded_spawn,
+           patches_dir=patches_dir)
     return 0
 
 

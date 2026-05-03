@@ -46,7 +46,8 @@ SESSIONS  := $(REPO_ROOT)/sessions
 JSONL     := $(SESSIONS)/recording_$(RECORDING_ID).jsonl
 
 .PHONY: help server server-bg server-stop status rc3-up deploy fullscreen \
-        run kill input input-stop replay clean-tasks list-sessions pull-sessions
+        run kill input input-stop replay clean-tasks list-sessions pull-sessions \
+        install-cv2
 
 help:
 	@echo "Phase 2 targets:"
@@ -65,6 +66,7 @@ help:
 	@echo "  clean-tasks  unregister scheduled tasks (xen-launch, xen-replay-input)"
 	@echo "  list-sessions   list recordings on RC ($(RC_IP))"
 	@echo "  pull-sessions   scp recording_$(RECORDING_ID).{jsonl,manifest.json} from RC -> sessions/"
+	@echo "  install-cv2     download Win cp311 wheels (cv2,numpy,Pillow) on Mac, scp + offline pip install on RC3"
 
 server:
 	@pkill -f 'v2_server.py' 2>/dev/null || true
@@ -103,6 +105,7 @@ deploy: rc3-up
 	$(SCP) _tools/resize_window.ps1 _tools/window_info.ps1 $(RC3):replay/
 	$(SCP) $(SESSIONS)/recording_$(RECORDING_ID).jsonl $(RC3):replay/
 	$(SCP) $(SESSIONS)/recording_$(RECORDING_ID).manifest.json $(RC3):replay/
+	-$(SCP) -r $(SESSIONS)/recording_$(RECORDING_ID)_patches $(RC3):replay/
 	@echo "[deploy] OK"
 
 fullscreen:
@@ -158,4 +161,28 @@ pull-sessions:
 	$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).jsonl' $(SESSIONS)/
 	-$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).manifest.json' $(SESSIONS)/
 	-$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).pcap' $(SESSIONS)/
+	-$(SCP) -r '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID)_patches' $(SESSIONS)/
 	@echo "[pull-sessions] OK: $(RECORDING_ID) -> $(SESSIONS)/"
+
+# RC3 has no internet. Download Windows cp311 wheels on Mac, scp them
+# to RC3, then run offline pip install. Idempotent — safe to re-run.
+CV2_WHEEL_DIR := _vendor/cv2-wheels
+install-cv2:
+	@mkdir -p $(CV2_WHEEL_DIR)
+	@echo "[install-cv2] downloading wheels for win_amd64 cp311..."
+	@$(PYTHON) -m pip download \
+		--platform win_amd64 \
+		--python-version 3.11 \
+		--implementation cp \
+		--abi cp311 \
+		--only-binary=:all: \
+		--dest $(CV2_WHEEL_DIR) \
+		opencv-python-headless numpy Pillow pywin32
+	@echo "[install-cv2] scp -> RC3:replay/_wheels/"
+	@$(SSH) $(RC3) 'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path $(REPLAY_REMOTE)/_wheels | Out-Null"'
+	$(SCP) -r $(CV2_WHEEL_DIR)/*.whl $(RC3):replay/_wheels/
+	@echo "[install-cv2] pip install offline on RC3..."
+	@$(SSH) $(RC3) 'powershell -NoProfile -Command "& $(PYTHON_REMOTE) -m pip install --no-index --find-links=$(REPLAY_REMOTE)/_wheels opencv-python-headless numpy Pillow pywin32"'
+	@echo "[install-cv2] verifying on RC3..."
+	@$(SSH) $(RC3) 'powershell -NoProfile -Command "& $(PYTHON_REMOTE) -c \"import cv2, numpy, PIL, win32gui; print(\\\"cv2\\\", cv2.__version__); print(\\\"numpy\\\", numpy.__version__); print(\\\"Pillow\\\", PIL.__version__)\""'
+	@echo "[install-cv2] OK"
