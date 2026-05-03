@@ -1,0 +1,862 @@
+{
+  "TDncServerSelectForm": {
+    "class_name_va": "0x0015251C",
+    "class_info_va": "0x00152488",
+    "instance_size": 124,
+    "parent_vmt_va": "0x00185558",
+    "vmt_methods": [
+      {
+        "offset": 12,
+        "va": "0x00013548"
+      },
+      {
+        "offset": 16,
+        "va": "0x00013554"
+      },
+      {
+        "offset": 20,
+        "va": "0x00013558"
+      },
+      {
+        "offset": 24,
+        "va": "0x0001355C"
+      },
+      {
+        "offset": 28,
+        "va": "0x00013550"
+      },
+      {
+        "offset": 32,
+        "va": "0x000132B4"
+      },
+      {
+        "offset": 36,
+        "va": "0x000132C8"
+      },
+      {
+        "offset": 40,
+        "va": "0x001526E0"
+      },
+      {
+        "offset": 44,
+        "va": "0x0019E93C"
+      },
+      {
+        "offset": 48,
+        "va": "0x00152850"
+      },
+      {
+        "offset": 52,
+        "va": "0x0018B36C"
+      },
+      {
+        "offset": 56,
+        "va": "0x0018B650"
+      },
+      {
+        "offset": 60,
+        "va": "0x0018B6BC"
+      },
+      {
+        "offset": 64,
+        "va": "0x0018BB50"
+      },
+      {
+        "offset": 68,
+        "va": "0x0019E96C"
+      },
+      {
+        "offset": 72,
+        "va": "0x0019E974"
+      },
+      {
+        "offset": 76,
+        "va": "0x0019E978"
+      },
+      {
+        "offset": 80,
+        "va": "0x0018BB9C"
+      },
+      {
+        "offset": 84,
+        "va": "0x0019E984"
+      },
+      {
+        "offset": 88,
+        "va": "0x0019E988"
+      },
+      {
+        "offset": 92,
+        "va": "0x0019E980"
+      },
+      {
+        "offset": 96,
+        "va": "0x0019E98C"
+      },
+      {
+        "offset": 100,
+        "va": "0x0019E990"
+      },
+      {
+        "offset": 104,
+        "va": "0x0019E998"
+      },
+      {
+        "offset": 108,
+        "va": "0x0019E9A0"
+      },
+      {
+        "offset": 112,
+        "va": "0x0019E9A8"
+      },
+      {
+        "offset": 116,
+        "va": "0x0019E9AC"
+      },
+      {
+        "offset": 120,
+        "va": "0x0019E9B0"
+      },
+      {
+        "offset": 124,
+        "va": "0x0019E9B4"
+      },
+      {
+        "offset": 128,
+        "va": "0x00152534"
+      },
+      {
+        "offset": 132,
+        "va": "0x0019E9B8"
+      },
+      {
+        "offset": 136,
+        "va": "0x0019E9BC"
+      },
+      {
+        "offset": 140,
+        "va": "0x0018C36C"
+      },
+      {
+        "offset": 144,
+        "va": "0x0018C398"
+      }
+    ],
+    "buttons": [],
+    "buttons_note": "TODO: requires Delphi RTTI Components-list traversal at runtime (or DFM resource extraction). Static enumeration not attempted in this pass \u2014 the form's components are populated by the constructor from a TForm.LoadFromResource() call referencing a DFM blob. Next step: locate the DFM resource in the PE resource section (RT_RCDATA, name = upper-case form class minus 'T') and parse it."
+  },
+  "TDncCharCreateForm": {
+    "class_name_va": "0x00149A68",
+    "class_info_va": "0x001499D4",
+    "instance_size": 180,
+    "parent_vmt_va": "0x00185558",
+    "vmt_methods": [
+      {
+        "offset": 12,
+        "va": "0x00013548"
+      },
+      {
+        "offset": 16,
+        "va": "0x00013554"
+      },
+      {
+        "offset": 20,
+        "va": "0x00013558"
+      },
+      {
+        "offset": 24,
+        "va": "0x0001355C"
+      },
+      {
+        "offset": 28,
+        "va": "0x00013550"
+      },
+      {
+        "offset": 32,
+        "va": "0x000132B4"
+      },
+      {
+        "offset": 36,
+        "va": "0x000132C8"
+      },
+      {
+        "offset": 40,
+        "va": "0x00149FE0"
+      },
+      {
+        "offset": 44,
+        "va": "0x0019E93C"
+      },
+      {
+        "offset": 48,
+        "va": "0x0014A844"
+      },
+      {
+        "offset": 52,
+        "va": "0x0014B0B8"
+      },
+      {
+        "offset": 56,
+        "va": "0x0014A008"
+      },
+      {
+        "offset": 60,
+        "va": "0x0018B6BC"
+      },
+      {
+        "offset": 64,
+        "va": "0x0018BB50"
+      },
+      {
+        "offset": 68,
+        "va": "0x0019E96C"
+      },
+      {
+        "offset": 72,
+        "va": "0x0019E974"
+      },
+      {
+        "offset": 76,
+        "va": "0x0019E978"
+      },
+      {
+        "offset": 80,
+        "va": "0x0014A848"
+      },
+      {
+        "offset": 84,
+        "va": "0x0019E984"
+      },
+      {
+        "offset": 88,
+        "va": "0x0019E988"
+      },
+      {
+        "offset": 92,
+        "va": "0x0019E980"
+      },
+      {
+        "offset": 96,
+        "va": "0x0019E98C"
+      },
+      {
+        "offset": 100,
+        "va": "0x0019E990"
+      },
+      {
+        "offset": 104,
+        "va": "0x0019E998"
+      },
+      {
+        "offset": 108,
+        "va": "0x0019E9A0"
+      },
+      {
+        "offset": 112,
+        "va": "0x0019E9A8"
+      },
+      {
+        "offset": 116,
+        "va": "0x0019E9AC"
+      },
+      {
+        "offset": 120,
+        "va": "0x0019E9B0"
+      },
+      {
+        "offset": 124,
+        "va": "0x0019E9B4"
+      },
+      {
+        "offset": 128,
+        "va": "0x00149ACC"
+      },
+      {
+        "offset": 132,
+        "va": "0x0019E9B8"
+      },
+      {
+        "offset": 136,
+        "va": "0x0019E9BC"
+      },
+      {
+        "offset": 140,
+        "va": "0x0018C36C"
+      },
+      {
+        "offset": 144,
+        "va": "0x0018C398"
+      }
+    ],
+    "buttons": [],
+    "buttons_note": "TODO: requires Delphi RTTI Components-list traversal at runtime (or DFM resource extraction). Static enumeration not attempted in this pass \u2014 the form's components are populated by the constructor from a TForm.LoadFromResource() call referencing a DFM blob. Next step: locate the DFM resource in the PE resource section (RT_RCDATA, name = upper-case form class minus 'T') and parse it.",
+    "note": "Char-create dialog. Char-LIST display is TDncCharSelectShow widget, NOT a TForm."
+  },
+  "TMainForm": {
+    "class_name_va": "0x0011A643",
+    "class_info_va": "0x0011A444",
+    "instance_size": 756,
+    "parent_vmt_va": "0x000B109C",
+    "vmt_methods": [
+      {
+        "offset": 12,
+        "va": "0x0002A5C4"
+      },
+      {
+        "offset": 16,
+        "va": "0x0003D63C"
+      },
+      {
+        "offset": 20,
+        "va": "0x0003D7D4"
+      },
+      {
+        "offset": 24,
+        "va": "0x0001355C"
+      },
+      {
+        "offset": 28,
+        "va": "0x000B1684"
+      },
+      {
+        "offset": 32,
+        "va": "0x000132B4"
+      },
+      {
+        "offset": 36,
+        "va": "0x000132C8"
+      },
+      {
+        "offset": 40,
+        "va": "0x0011B920"
+      },
+      {
+        "offset": 44,
+        "va": "0x00050DF4"
+      },
+      {
+        "offset": 48,
+        "va": "0x000B1668"
+      },
+      {
+        "offset": 52,
+        "va": "0x00023AC0"
+      },
+      {
+        "offset": 56,
+        "va": "0x0003D9F4"
+      },
+      {
+        "offset": 60,
+        "va": "0x0003DA30"
+      },
+      {
+        "offset": 64,
+        "va": "0x0003DB3C"
+      },
+      {
+        "offset": 68,
+        "va": "0x00049FE4"
+      },
+      {
+        "offset": 72,
+        "va": "0x0002A5DC"
+      },
+      {
+        "offset": 76,
+        "va": "0x0003E35C"
+      },
+      {
+        "offset": 80,
+        "va": "0x0002A2BC"
+      },
+      {
+        "offset": 84,
+        "va": "0x00041B80"
+      },
+      {
+        "offset": 88,
+        "va": "0x0011ACAC"
+      },
+      {
+        "offset": 92,
+        "va": "0x000508EC"
+      },
+      {
+        "offset": 96,
+        "va": "0x00050E24"
+      },
+      {
+        "offset": 100,
+        "va": "0x00050D50"
+      },
+      {
+        "offset": 104,
+        "va": "0x000503BC"
+      },
+      {
+        "offset": 108,
+        "va": "0x0003E03C"
+      },
+      {
+        "offset": 112,
+        "va": "0x000500FC"
+      },
+      {
+        "offset": 116,
+        "va": "0x00049564"
+      },
+      {
+        "offset": 120,
+        "va": "0x00049568"
+      },
+      {
+        "offset": 124,
+        "va": "0x0003E130"
+      },
+      {
+        "offset": 128,
+        "va": "0x0004C0CC"
+      },
+      {
+        "offset": 132,
+        "va": "0x000496E4"
+      },
+      {
+        "offset": 136,
+        "va": "0x0004A160"
+      },
+      {
+        "offset": 140,
+        "va": "0x0003E324"
+      },
+      {
+        "offset": 144,
+        "va": "0x0003E1F0"
+      },
+      {
+        "offset": 148,
+        "va": "0x0004A298"
+      },
+      {
+        "offset": 152,
+        "va": "0x0011D6BC"
+      },
+      {
+        "offset": 156,
+        "va": "0x0004C14C"
+      },
+      {
+        "offset": 160,
+        "va": "0x00050188"
+      },
+      {
+        "offset": 164,
+        "va": "0x00050204"
+      },
+      {
+        "offset": 168,
+        "va": "0x0004FD50"
+      },
+      {
+        "offset": 172,
+        "va": "0x000501E8"
+      },
+      {
+        "offset": 176,
+        "va": "0x0003D2B4"
+      },
+      {
+        "offset": 180,
+        "va": "0x0003E8B0"
+      },
+      {
+        "offset": 184,
+        "va": "0x0004D7AC"
+      },
+      {
+        "offset": 188,
+        "va": "0x0003F530"
+      },
+      {
+        "offset": 192,
+        "va": "0x000B14C8"
+      },
+      {
+        "offset": 196,
+        "va": "0x0003F744"
+      },
+      {
+        "offset": 200,
+        "va": "0x000B1644"
+      },
+      {
+        "offset": 204,
+        "va": "0x0004D6A8"
+      },
+      {
+        "offset": 208,
+        "va": "0x00050328"
+      },
+      {
+        "offset": 212,
+        "va": "0x00040078"
+      },
+      {
+        "offset": 216,
+        "va": "0x0004FFAC"
+      },
+      {
+        "offset": 220,
+        "va": "0x00041460"
+      },
+      {
+        "offset": 224,
+        "va": "0x0003CCA8"
+      },
+      {
+        "offset": 228,
+        "va": "0x0003CF58"
+      },
+      {
+        "offset": 232,
+        "va": "0x00040674"
+      },
+      {
+        "offset": 236,
+        "va": "0x0003D920"
+      },
+      {
+        "offset": 240,
+        "va": "0x0003D994"
+      },
+      {
+        "offset": 244,
+        "va": "0x000B183C"
+      },
+      {
+        "offset": 248,
+        "va": "0x0003D674"
+      },
+      {
+        "offset": 252,
+        "va": "0x00041334"
+      },
+      {
+        "offset": 256,
+        "va": "0x0003FB50"
+      },
+      {
+        "offset": 260,
+        "va": "0x000414F8"
+      },
+      {
+        "offset": 264,
+        "va": "0x0003E320"
+      }
+    ],
+    "buttons": [],
+    "buttons_note": "Extracted from RT_RCDATA TMAINFORM DFM resource. 0 buttons found. OnClick names map to published methods on the form's class \u2014 resolve via Delphi RTTI MethodTable (vmtMethodTable) or by matching the name string to nearby code refs.",
+    "note": "Bootstrap launcher form (ClientWidth=353, ClientHeight=242, parent=TTntForm). After login it hosts the TDncRootWidget which renders all in-world UI on canvas. For 'in-world' RE, the TDnc* widget classes are more relevant \u2014 see TDncCharSelectShow, TDncGameMainMenu, TDncRootWidget."
+  },
+  "TDncCharSelectShow": {
+    "class_name_va": "0x000EE721",
+    "class_info_va": "0x000EE694",
+    "instance_size": 132,
+    "parent_vmt_va": "0x0019C148",
+    "vmt_methods": [
+      {
+        "offset": 12,
+        "va": "0x00013548"
+      },
+      {
+        "offset": 16,
+        "va": "0x00013554"
+      },
+      {
+        "offset": 20,
+        "va": "0x00013558"
+      },
+      {
+        "offset": 24,
+        "va": "0x0001355C"
+      },
+      {
+        "offset": 28,
+        "va": "0x00013550"
+      },
+      {
+        "offset": 32,
+        "va": "0x000132B4"
+      },
+      {
+        "offset": 36,
+        "va": "0x000132C8"
+      },
+      {
+        "offset": 40,
+        "va": "0x000EEC4C"
+      },
+      {
+        "offset": 44,
+        "va": "0x0019E93C"
+      },
+      {
+        "offset": 48,
+        "va": "0x000EF7F0"
+      },
+      {
+        "offset": 52,
+        "va": "0x0019E94C"
+      },
+      {
+        "offset": 56,
+        "va": "0x000EF5C0"
+      },
+      {
+        "offset": 60,
+        "va": "0x000EF6D8"
+      },
+      {
+        "offset": 64,
+        "va": "0x000EF7DC"
+      },
+      {
+        "offset": 68,
+        "va": "0x0019E96C"
+      },
+      {
+        "offset": 72,
+        "va": "0x0019E974"
+      },
+      {
+        "offset": 76,
+        "va": "0x0019E978"
+      },
+      {
+        "offset": 80,
+        "va": "0x000F1310"
+      },
+      {
+        "offset": 84,
+        "va": "0x0019E984"
+      },
+      {
+        "offset": 88,
+        "va": "0x0019E988"
+      },
+      {
+        "offset": 92,
+        "va": "0x0019E980"
+      },
+      {
+        "offset": 96,
+        "va": "0x0019E98C"
+      },
+      {
+        "offset": 100,
+        "va": "0x0019E990"
+      },
+      {
+        "offset": 104,
+        "va": "0x0019E998"
+      },
+      {
+        "offset": 108,
+        "va": "0x0019E9A0"
+      },
+      {
+        "offset": 112,
+        "va": "0x0019E9A8"
+      },
+      {
+        "offset": 116,
+        "va": "0x0019E9AC"
+      },
+      {
+        "offset": 120,
+        "va": "0x0019E9B0"
+      },
+      {
+        "offset": 124,
+        "va": "0x0019E9B4"
+      },
+      {
+        "offset": 128,
+        "va": "0x000EE7D8"
+      },
+      {
+        "offset": 132,
+        "va": "0x0019E9B8"
+      },
+      {
+        "offset": 136,
+        "va": "0x0019E9BC"
+      }
+    ],
+    "buttons": [],
+    "buttons_note": "Not a TForm \u2014 this is a TDncWidget subclass (custom canvas-painted UI). No DFM resource. Children are constructed in code in vmt slot @+0x28-0x40 (typically Create/Init). Decompile those to see the widget hierarchy.",
+    "category": "custom_widget"
+  },
+  "TDncGameMainMenu": {
+    "class_name_va": "0x000F3B51",
+    "class_info_va": "0x000F3ABC",
+    "instance_size": 132,
+    "parent_vmt_va": "0x00185558",
+    "vmt_methods": [
+      {
+        "offset": 12,
+        "va": "0x00013548"
+      },
+      {
+        "offset": 16,
+        "va": "0x00013554"
+      },
+      {
+        "offset": 20,
+        "va": "0x00013558"
+      },
+      {
+        "offset": 24,
+        "va": "0x0001355C"
+      },
+      {
+        "offset": 28,
+        "va": "0x00013550"
+      },
+      {
+        "offset": 32,
+        "va": "0x000132B4"
+      },
+      {
+        "offset": 36,
+        "va": "0x000132C8"
+      },
+      {
+        "offset": 40,
+        "va": "0x000F3D70"
+      },
+      {
+        "offset": 44,
+        "va": "0x0019E93C"
+      },
+      {
+        "offset": 48,
+        "va": "0x000F3E88"
+      },
+      {
+        "offset": 52,
+        "va": "0x000F3D98"
+      },
+      {
+        "offset": 56,
+        "va": "0x000F3DA0"
+      },
+      {
+        "offset": 60,
+        "va": "0x000F3DA8"
+      },
+      {
+        "offset": 64,
+        "va": "0x000F3DB0"
+      },
+      {
+        "offset": 68,
+        "va": "0x0019E96C"
+      },
+      {
+        "offset": 72,
+        "va": "0x0019E974"
+      },
+      {
+        "offset": 76,
+        "va": "0x0019E978"
+      },
+      {
+        "offset": 80,
+        "va": "0x000F3E84"
+      },
+      {
+        "offset": 84,
+        "va": "0x0019E984"
+      },
+      {
+        "offset": 88,
+        "va": "0x0019E988"
+      },
+      {
+        "offset": 92,
+        "va": "0x0019E980"
+      },
+      {
+        "offset": 96,
+        "va": "0x0019E98C"
+      },
+      {
+        "offset": 100,
+        "va": "0x0019E990"
+      },
+      {
+        "offset": 104,
+        "va": "0x0019E998"
+      },
+      {
+        "offset": 108,
+        "va": "0x0019E9A0"
+      },
+      {
+        "offset": 112,
+        "va": "0x0019E9A8"
+      },
+      {
+        "offset": 116,
+        "va": "0x0019E9AC"
+      },
+      {
+        "offset": 120,
+        "va": "0x0019E9B0"
+      },
+      {
+        "offset": 124,
+        "va": "0x0019E9B4"
+      },
+      {
+        "offset": 128,
+        "va": "0x000F3B64"
+      },
+      {
+        "offset": 132,
+        "va": "0x0019E9B8"
+      },
+      {
+        "offset": 136,
+        "va": "0x0019E9BC"
+      },
+      {
+        "offset": 140,
+        "va": "0x0018C36C"
+      },
+      {
+        "offset": 144,
+        "va": "0x0018C398"
+      }
+    ],
+    "buttons": [],
+    "buttons_note": "Not a TForm \u2014 this is a TDncWidget subclass (custom canvas-painted UI). No DFM resource. Children are constructed in code in vmt slot @+0x28-0x40 (typically Create/Init). Decompile those to see the widget hierarchy.",
+    "category": "custom_widget"
+  },
+  "TDncRootWidget": {
+    "class_name_va": "0x00154D61",
+    "class_info_va": "0x00154CD4",
+    "instance_size": 96,
+    "parent_vmt_va": "0x0019C148",
+    "category": "custom_widget"
+  },
+  "TDncNPCDialogU": {
+    "class_name_va": "0x000F431F",
+    "class_info_va": "0x000F4268",
+    "instance_size": 140,
+    "parent_vmt_va": "0x00185558",
+    "category": "custom_widget"
+  }
+}

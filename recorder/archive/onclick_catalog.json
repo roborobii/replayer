@@ -1,0 +1,590 @@
+{
+  "_comment": "Catalog of known DXRender.exe Delphi OnClick handler VAs and per-class TMethod offsets. Keyed by handler VA as lowercase hex string (no 0x prefix). Status enum: verified=smoke-tested end-to-end with full effect confirmed; verified_partial=smoke-tested observable subset (e.g. only some sub-handlers, or effect partially confirmed); inferred=class offset known via dom_actions.ONCLICK_OFFSETS but specific handler not smoke-tested; do_not_invoke=tested and known to crash/destroy state via wrong cv; dangerous=verified but destructive (terminates client / deletes data). Source-of-truth \u2014 consumed by pipeline/delphi_dom.py for DOM-badge enrichment.",
+  "handlers": {
+    "152708": {
+      "name": "ServerSelect_OK_Connect",
+      "class": "TDncNormBtn",
+      "owner_form": "TDncServerSelectForm",
+      "effect": "Sends 0xD3 SVC handshake; calls ConnectToSelectedServer (0x155A44) then SendD3Handshake (0x152F30). End-to-end: client transitions Server Select -> Char Select.",
+      "status": "verified",
+      "verified_by": "smoke 1 (2026-04-28)",
+      "vm_parity": {
+        "confirmed": true,
+        "recording": "jureah-raito-run7",
+        "snap_diff": "0002->0003",
+        "memory_evidence": "TDncServerSelectForm @0x029080d0: +0x18 0x01->0x00 and +0x1A 0x00->0x01 (matches form_watcher_fields entry: 'form active -> advanced toggles when OK pressed'). TDncCharSelectShow @0x07adfde0: +0x7C 0x00->0x01 (form-becoming-active flag). New TDncCharSelectShow shell instance appears at 0x003dfa54 (count 1->2).",
+        "network_evidence": "pcap frame 4 (recording-relative ~14.56s): C->S 1819 39B = 25 00 d3 + 20B token + ea 03 b1 36 d1 24 00 00 + 8x 0x01 (V2 handshake marker). frame 6: S->C 1819 4B 02 00 d3 00 (ack). frame 7: C->S 1819 23B 0xD4 char-list req. frame 8: S->C 1819 176B 0xD4 reply with 3 chars (Raito/Blu/Rez at acct_id 0x49C62346 = Jureah).",
+        "validated": "2026-04-29"
+      },
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0x141b08",
+        "handler_code_va": "0x00152708",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0x1418b4"
+      }
+    },
+    "1527dc": {
+      "name": "ServerSelect_Quit",
+      "class": "TDncNormBtn",
+      "owner_form": "TDncServerSelectForm",
+      "owner_chain": "TDncServerSelectForm/TDncNormBtn[idx=3]",
+      "effect": "Terminates the DXRender process (Cancel/Quit on the Server Select modal). Originally hypothesized as a benign 'Close' but smoke-tested 2026-04-29: invoke returns cleanly, then DXRender exits ~immediately. NOT a no-op modal-close \u2014 destroys the client.",
+      "status": "dangerous",
+      "verified_by": "smoke 2026-04-29 (DXRender pid disappeared after invoke; tested at heap 0x01c7de40 on a fresh launch)",
+      "notes": "No VM parity recording covers this \u2014 happy-path login recording (jureah-raito-run7) does not exercise Quit. Re-record only if intentionally testing client-shutdown path.",
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0x141bdc",
+        "handler_code_va": "0x001527DC",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0x1418b4"
+      }
+    },
+    "152888": {
+      "name": "ServerSelect_RowSelect",
+      "class": "TDncItemListbox",
+      "owner_form": "TDncServerSelectForm",
+      "owner_chain": "TDncServerSelectForm/TDncItemListbox[idx=1]",
+      "effect": "Server-list listbox row click handler. Smoke-tested 2026-04-29 (Wave 2c): invoke returns cleanly, DXRender stays alive, NO network packets, NO observable form-state changes within first 0x80 bytes of TDncServerSelectForm. Pure UI handler, safe to invoke. (Likely fires on already-selected default row -> idempotent/no-op when invoked without explicit row-index Sender state; would need [Sender+0x24] populated to actually change selection.)",
+      "static_analysis": {
+        "decomp_summary": "Function body NOT decompiled. VA is in the same 0x152xxx range as 0x152708 (ServerSelect_OK_Connect, verified) and 0x1527dc (ServerSelect_Quit, verified) and 0x152f30 (SendD3Handshake) \u2014 strong evidence this is in the same compilation unit (ServerSelect form module). Class is TDncItemListbox (offset +0x98).",
+        "calls": [
+          "unknown"
+        ],
+        "memory_writes": [
+          "likely inside the TDncItemListbox child instance or its backing-data list, NOT in TDncServerSelectForm's first 0x80 bytes (REFUTED by Wave 2b mining)"
+        ],
+        "network_sends": [
+          "none \u2014 pure UI state"
+        ],
+        "confidence": "medium",
+        "hypothesis": "Pure row-highlight handler; updates listbox-internal state for downstream OK-button consumption.",
+        "safe_to_smoke_test": true
+      },
+      "status": "verified",
+      "verified_by": "wave 2c smoke 2026-04-29 (no-op on default-highlighted row)",
+      "vm_parity": {
+        "confirmed": true,
+        "recording": "jureah-raito-run7",
+        "snap_diff": "0000->0001 (Jureah->Test_All) and 0001->0002 (Test_All->Jureah)",
+        "memory_evidence": "TDncServerSelectForm @0x029080d0: ZERO byte changes within first 0x80 across both row-select transitions. REFUTES the prior catalog hypothesis that +0x0C..0x0F (last-clicked widget ptr) and +0x39 (dirty flag) are written by this handler in the form itself. Implication: row-select state lives inside the TDncItemListbox child instance (offset +0x98 OnClick) or in a sibling backing-data list, NOT in the parent form's first 0x80 bytes. The form's +0x18/+0x1A toggles only flip on OK (snap_0002->0003), not on row-select.",
+        "network_evidence": "No protocol packets emitted by row-select (pcap shows only 0x05 keepalives during char-select; ServerSelect row-select happened pre-pcap-window in this recording but follows the same no-network pattern by analogy with the charselect-slot handler).",
+        "validated": "2026-04-29"
+      },
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0x141c88",
+        "handler_code_va": "0x00152888",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0x1418b4"
+      }
+    },
+    "f1484": {
+      "name": "CharSelect_DispatcherA",
+      "class": "TDncNormBtn",
+      "owner_form": "TDncCharSelectShow",
+      "owner_chain": "TDncCharSelectShow/TDncNormBtn[idx=0|1]",
+      "effect": "Generic char-select bottom-bar dispatcher. Constructed identically for two adjacent buttons (idx=0 with [Sender+0x24]=0, idx=1 with [Sender+0x24]=1) \u2014 see ghidra/decomp.c lines 947-988 \u2014 so it dispatches on the slot byte. CORRECTED Wave 2c idx-mapping: idx=0 = StartGame (verified end-to-end via smoke_full_walk), idx=1 = SelectServer (re-opens ServerSelect modal, blocks DLL poll thread inside modal sub-loop). Wave-1's mapping (idx=0=ExitGame, idx=1=SelectServer) was WRONG.",
+      "sub_handlers": {
+        "idx=0": {
+          "name": "CharSelect_StartGame",
+          "status": "verified",
+          "verified_by": "wave 2c smoke 2026-04-29",
+          "notes": "Wave 2c smoke: invoke after pick_slot(populated) sends 0xD7 SVC StartGame, opens chat (0xB0 SetName) + world (V2 LLOGIN), reaches in-world. NOT ExitGame as Wave-1 hypothesized. Confirms Wave 2a static analysis (line 793 of fn_EF5C0 calls FUN_000f1484(form, +0x60) on activate-character path). Same path used by smoke_full_walk.py."
+        },
+        "idx=1": {
+          "name": "CharSelect_SelectServer",
+          "status": "verified",
+          "verified_by": "wave 2c smoke 2026-04-29",
+          "notes": "Smoke 2026-04-29 at heap 0x01c7df60. Re-opens ServerSelect modal; blocks DLL poll thread inside modal sub-loop."
+        }
+      },
+      "static_analysis": {
+        "decomp_summary": "Function body NOT decompiled. Strong indirect signal: the form's vmt+0x38 mouse handler (fn_EF5C0 in decomp/decomp.c:744-805) calls FUN_000f1484(form, *(form+0x60)) when (param_2 & 0x40) is set AND a name is present at the selected slot \u2014 i.e. the double-click / activate-character path. *(form+0x60) is the bottom-bar NormBtn whose [+0x24]=0 (constructor sets +0x60.+0x24=0; +0x68.+0x24=1).",
+        "calls": [
+          "call site 1: invoked from fn_EF5C0 (TDncCharSelectShow vmt+0x38) at decomp.c:793 with btn slot=0",
+          "call site 2 (implicit): clicked directly when user presses the +0x60 or +0x68 button"
+        ],
+        "network_sends": [
+          "0xD7 SVC StartGame for [Sender+0x24]=0",
+          "no network for [Sender+0x24]=1 (local modal re-open)"
+        ],
+        "confidence": "high"
+      },
+      "status": "verified",
+      "verified_by": "wave 2c smoke 2026-04-29 (idx=0 + idx=1 both verified)",
+      "vm_parity": {
+        "confirmed": true,
+        "recording": "jureah-raito-run7",
+        "snap_diff": "0007->0008 (2nd click of double-click on Raito -> in-world; legitimate user path goes through fn_EF5C0 -> f1484 idx=0 via the +0x60 NormBtn)",
+        "memory_evidence": "TDncCharSelectShow @0x07adfde0: +0x18 0x01->0x00 (form-active flag cleared, mirroring ServerSelect's pattern on advance). TDncCharSelectShow shell instance @0x003df314 disappears (count 2->1). TDncRootWidget @0x0292ebd0: +0x0C..0x0F u32 0x0292ec08->0x07aef240 (active-widget ptr swap, in-world widget bound), +0x50 0x01->0x00, +0x52 0x01->0x00 (state flags clear). TDncGameMainMenu @0x07ae0110: +0x4C 0x00->0x02 (in-world menu activation flag). TMainForm @0x0297e530: +0x44 0x00->0x01.",
+        "network_evidence": "pcap frame 23 (~38.68s, on the 2nd click of double-click): C->S 18124 9B = 07 00 b0 05 'Raito' (0xB0 SetName). frame 24: C->S 1819 3B = 01 00 d7 (0xD7 StartGame). frame 28: S->C 1819 4B = 02 00 d7 00 (ack). frame 29: S->C 18124 75B 0xB1 roster + 0xB6 01. frames 37-46: encrypted world handshake on 18123 (V2 LLOGIN + spawn bundle).",
+        "validated": "2026-04-29"
+      },
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0xe0884",
+        "handler_code_va": "0x000F1484",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0xddac0"
+      }
+    },
+    "f164c": {
+      "name": "CharSelect_DispatcherB",
+      "class": "TDncNormBtn",
+      "owner_form": "TDncCharSelectShow",
+      "owner_chain": "TDncCharSelectShow/TDncNormBtn[idx=2|3]",
+      "effect": "Second bottom-bar dispatcher. Pair of buttons distinct from f1484 (Exit + DeleteCharTrigger pair, verified by Wave 2c via process of elimination). idx=2 closes the SVC connection (Exit/Logout) but leaves DXRender alive, no DB delete. idx=3 fires no network and no DB change \u2014 most consistent with opening a local Delete-confirm modal (the Yes button on that modal would emit 0xD6 if/when RE'd).",
+      "sub_handlers": {
+        "idx=2": {
+          "name": "CharSelect_ExitOrLogout",
+          "status": "verified",
+          "verified_by": "wave 2c smoke 2026-04-29",
+          "notes": "Wave 2c smoke 2026-04-29 with throwaway slot 0 (Player25) selected: invoked at TDncCharSelectShow/TDncNormBtn[idx=2]. SVC connection 'Closed connection for 172.18.0.1' on emulator side, DXRender stayed alive. Player25 NOT deleted from DB. So this is NOT the Delete handler \u2014 most likely 'Exit/Logout' returning to login-or-server-select."
+        },
+        "idx=3": {
+          "name": "CharSelect_DeleteChar_Trigger",
+          "status": "verified_partial",
+          "verified_by": "wave 2c smoke 2026-04-29",
+          "notes": "Wave 2c smoke 2026-04-29 with Raito (slot 3) selected: invoked at TDncCharSelectShow/TDncNormBtn[idx=3]. No network packet, no DB change, DXRender alive. Most likely opens a delete-confirm modal locally (no wire packet emitted until user confirms). Cannot fully verify without DOM-snap of confirm modal post-invoke (DLL poll thread blocked inside modal sub-loop)."
+        }
+      },
+      "static_analysis": {
+        "decomp_summary": "Function body NOT decompiled \u2014 appears only as &LAB_000f164c (Ghidra bare label, signaling Ghidra failed to derive a full decompilation). Constructor evidence (ghidra/decomp.c:989-1017): wired to two NormBtns, +0x6c with [+0x24]=0 and +0x64 with [+0x24]=1. Both buttons configured with FUN_0019e39c(...,1) (vs (...,0) for the f1484 pair) \u2014 possibly an enabled/visibility flag difference.",
+        "calls": [
+          "unknown (no body)"
+        ],
+        "network_sends": [
+          "idx=2 closes SVC (TCP teardown, no V2 opcode)",
+          "idx=3 emits nothing (modal-confirm Yes would later emit 0xD6 if RE'd)"
+        ],
+        "confidence": "medium"
+      },
+      "status": "verified_partial",
+      "verified_by": "wave 2c smoke 2026-04-29 (idx=2 closes SVC; idx=3 local-only / opens delete-confirm modal \u2014 modal Yes button NOT yet RE'd)",
+      "notes": "No VM parity recording \u2014 happy-path login recording (jureah-raito-run7) does not exercise the Exit or Delete buttons. Need new VM recording: select populated slot, click Exit or click Delete -> confirm Yes.",
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0xe0a4c",
+        "handler_code_va": "0x000F164C",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0xddac0"
+      }
+    },
+    "f1b70": {
+      "name": "CharListItem_OnClick_DoNotInvokeDirectly",
+      "class": "TDncCharListItem",
+      "owner_form": "TDncCharSelectShow",
+      "effect": "WARNING: Do NOT invoke directly. Tail-calls dispatcher with the form's first action button as Sender, triggering enter-world (case 0) instead of slot select. Use the inner TDncNormBtn[idx=1] (0xf236c) instead. See CLAUDE.md 'Per-row slot-select OnClick'.",
+      "static_analysis": {
+        "decomp_summary": "Function body NOT decompiled (only &LAB_000f1b70 references). Constructor (ghidra/decomp.c:1036-1063) assigns &LAB_000f1b70 to ALL 10 TDncCharListItem child slots' OnClick offset +0x40 (TDncCharListItem class offset). Tail-calls into form's dispatcher with Sender=form's first action button (the +0x60 NormBtn whose [+0x24]=0 = StartGame), bypassing per-slot indexing.",
+        "calls": [
+          "tail-calls into FUN_000f1484 with Sender = *(form+0x60), per CLAUDE.md note + smoke 2 anti-pattern"
+        ],
+        "network_sends": [
+          "0xD7 SVC StartGame indirectly, by triggering the f1484 [+0x24]=0 case"
+        ],
+        "confidence": "high"
+      },
+      "status": "do_not_invoke",
+      "verified_by": "smoke 2 anti-pattern (2026-04-28)",
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0xe0f70",
+        "handler_code_va": "0x000F1B70",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0xddac0"
+      }
+    },
+    "f236c": {
+      "name": "CharSlot_Select_InnerBtn",
+      "class": "TDncNormBtn",
+      "owner_form": "TDncCharSelectShow",
+      "owner_chain": "TDncCharSelectShow/TDncCharListWidget[idx=5]/TDncCharListItem[idx=N]/TDncNormBtn[idx=1|2]",
+      "effect": "DISPATCHER keyed on [Sender+0x24] (the per-button role byte). Body (objdump 2026-04-29 at 0xf236c): (1) ALWAYS writes *0x1c1678 = [Self+0x24] (selected-slot byte from EAX=data half of TMethod). (2) Reads role = [Sender+0x24] (EDX) and switches: role==0 -> calls 0x149a7c on *0x1c0aac (TDncCharCreateForm: zeros +0xB0 hair byte, sets +0xB1=0x80 male, calls Show via 0x19e3b0 with dl=1 -> POPS CHARCREATE MODAL). role==1 -> calls 0xedf08 on *0x1c0fbc (different CharCreate-shell init via +0x7c/+0x74/+0x78 widgets, also Show with dl=1 -> POPS CHARCREATE MODAL). role>=2 -> bare 'ret' (slot-byte write only, no side-effect; the CLEAN SELECT path).",
+      "status": "verified",
+      "verified_by": "smoke 4 (2026-04-28); static disasm root-cause 2026-04-29",
+      "dispatch": {
+        "key": "[Sender+0x24] (EDX+0x24) \u2014 per-button role byte",
+        "branches": {
+          "0": {"effect": "opens TDncCharCreateForm via 0x149a7c (zeros hair, sets sex=male)", "safe": false},
+          "1": {"effect": "opens CharCreate shell via 0xedf08 (toggles +0x7c/+0x74/+0x78)", "safe": false},
+          ">=2": {"effect": "slot-byte write only, immediate ret", "safe": true}
+        }
+      },
+      "do_not_invoke_on_populated_slot": "Per-row TDncNormBtn[idx=1] has [Sender+0x24]==1 -> CharCreate modal opens on populated rows (bug observed 2026-04-29 with Raito at slot 3). Visual mouse click goes through TDncCharSelectShow's vmt+0x38 mouse handler (fn_EF5C0 in decomp.c:744), NOT through this OnClick \u2014 that handler has its own select/create gating via 'is slot empty' check at decomp.c:771. fn_EF5C0 is the canonical select path; this OnClick is a context-menu-style sub-button used by the activation animation, not by user clicks.",
+      "fix": "Use the DLL `pick_slot N` command (raw write to *0x1c1678 = N) instead of invoking this handler. pick_slot mirrors the byte-write-only branch (role>=2) without firing any sub-handler. See smoke_full_walk.py lines 53-59. pick_slot is the canonical DOM-event-driven select for populated slots.",
+      "vm_parity": {
+        "confirmed": true,
+        "recording": "jureah-raito-run7",
+        "snap_diff": "0003->0004 (slot 0->1), 0004->0005 (1->2), 0005->0006 (2->0)",
+        "memory_evidence": "TDncCharSelectShow @0x07adfde0: +0x7D ONLY changes per slot click. Observed sequence: snap_0003 (post-OK) +0x7D=0x00, snap_0004 +0x7D=0x01, snap_0005 +0x7D=0x02, snap_0006 +0x7D=0x00. CONFIRMS catalog form_watcher entry 'TDncCharSelectShow +0x7D = active char slot index'. NOTE: catalog 'effect' line says the handler writes `*0x1c1678` (a global) \u2014 this recording shows the SAME byte ALSO mirrors into the form instance at +0x7D, OR (more likely) +0x7D is the canonical storage and the global is a derived cache.",
+        "network_evidence": "pcap during snaps 0003->0006 shows ONLY 3B `01 00 05` keepalives every ~5s on 1819. Zero protocol packets emitted by slot-click handler. CONFIRMS catalog claim: 'pure state-write, no network packet'.",
+        "validated": "2026-04-29"
+      },
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0xe176c",
+        "handler_code_va": "0x000F236C",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0xddac0"
+      }
+    },
+    "f3db8": {
+      "name": "GameMainMenu_DispatcherX",
+      "class": "TDncNormBtn",
+      "owner_form": "TDncGameMainMenu",
+      "owner_chain": "TDncGameMainMenu/TDncNormBtn[idx=1|2|3|4]",
+      "effect": "In-world Main Menu button handler. 4 instances (idx=1..4) likely correspond to menu buttons (e.g., Inventory/Skill/Quest/Options). Wave 2c smoke 2026-04-29 (idx=1 only): reached S5 via smoke_full_walk path with New3, then resolved TDncGameMainMenu@vmt=0xf3ae8/TDncNormBtn[idx=1] -> heap 0x0197f5e0, invoked. DXRender stayed alive, NO network packets emitted -> pure local UI handler (likely opens a sub-form like Inventory). idx=2..4 not yet tested but expected to be safe by symmetry.",
+      "sub_handlers": {
+        "idx=1": {
+          "name": "GameMainMenu_Btn1",
+          "status": "verified",
+          "verified_by": "wave 2c smoke 2026-04-29",
+          "notes": "pure UI, no network, client alive"
+        },
+        "idx=2": {
+          "name": "GameMainMenu_Btn2",
+          "status": "inferred",
+          "notes": "expected safe by symmetry; not yet smoke-tested"
+        },
+        "idx=3": {
+          "name": "GameMainMenu_Btn3",
+          "status": "inferred",
+          "notes": "expected safe by symmetry; not yet smoke-tested"
+        },
+        "idx=4": {
+          "name": "GameMainMenu_Btn4",
+          "status": "inferred",
+          "notes": "expected safe by symmetry; not yet smoke-tested"
+        }
+      },
+      "static_analysis": {
+        "decomp_summary": "Function body NOT decompiled. No call sites or VMT-assignment lines visible. Only known via DOM-walk evidence: assigned identically to 4 NormBtns within TDncGameMainMenu (in-world HUD/menu form).",
+        "confidence": "low"
+      },
+      "status": "verified_partial",
+      "verified_by": "wave 2c smoke 2026-04-29 (idx=1 only; pure UI, no network)",
+      "notes": "No VM parity recording \u2014 happy-path recording stops at snap_0008 (just-entered-world) before any in-world menu interaction. Need new VM recording: enter world, click each main-menu button.",
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0xe31b8",
+        "handler_code_va": "0x000F3DB8",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0xe2ee8"
+      }
+    },
+    "14a024": {
+      "name": "CharCreate_SubmitOrCancel",
+      "class": "TDncNormBtn",
+      "owner_form": "TDncCharCreateForm",
+      "owner_chain": "TDncCharCreateForm/TDncCharCreateFormStub[idx=1]/TDncNormBtn[idx=1|2]",
+      "effect": "Char Create modal action buttons. NormBtn[idx=1] (rect y=200) = Submit (validate name, send 0xD5 create packet). NormBtn[idx=2] (rect y=225) = Cancel (close modal). Same code VA so it's a dispatcher keyed on [Sender+0x24].",
+      "sub_handlers": {
+        "idx=1": {
+          "name": "CharCreate_Submit",
+          "status": "verified_partial",
+          "verified_by": "wave 2c smoke 2026-04-29",
+          "notes": "Wave 2c smoke: invoked from S2 (form constructed but not visibly open). DXRender alive, no 0xD5 emitted. Validator path likely rejected empty/short name (Korean error string from encrypted resource). Need name-buffer write capability to fully verify D5 emission."
+        },
+        "idx=2": {
+          "name": "CharCreate_Cancel",
+          "status": "verified",
+          "verified_by": "wave 2c smoke 2026-04-29",
+          "notes": "Wave 2c smoke: invoked from S2 with form constructed in memory. DXRender alive, no network, no DB change. Pure UI close handler."
+        }
+      },
+      "static_analysis": {
+        "decomp_summary": "Static disasm 2026-04-29 (gate 2 retry). Dispatch on [Sender+0x24]: ==0 -> Submit (fallthrough at 0x14a05a), ==1 -> Cancel (je 0x14a5c9), else -> ret. Submit reads name via 0x14a05d 'mov eax, [esi+0xAC]; call 0x18d8a4' where esi=Self=TDncCharCreateForm. So TDncCharCreateForm+0xAC is a pointer to the TDncGulimEdit name widget. The getter 0x18d8a4 reconstructs visible text as substr(pre-cursor of [Edit+0x34]) + [Edit+0x38] + substr(post-cursor of [Edit+0x34]) using LStrCatN(eax,3,...) and Copy(s, idx, count) at 0x6d2c0. Validator chain: empty-check (jne 0x14a0af) -> Pos(forbidden_string_at_0x14a628, name) -> Length>=3 -> Length<=12 -> per-char filter (ASCII<0x7F or hex digits) -> per-char filter (Korean Hangul ranges 0x81-0xFE high byte / 0x40-0xFE low byte). On reject: ShowMessage via 0x1063b0 then 'mov eax,[esi+0xac]; call 0x19c328' (likely focus widget). Cross-reference to V2 protocol: 0xD5 56-byte payload bytes 1..16 = name (16B null-pad ASCII); +0xB0/+0xB1 of form (hair / sex+class) written by 0x14a668.",
+        "name_buffer": {
+          "form_offset": "0xAC",
+          "form_offset_kind": "ptr_to_TDncGulimEdit_instance",
+          "edit_text_offset": "0x34",
+          "edit_text_kind": "Delphi PAnsiString (long string). nil when empty; pointer to bytes after a 8-byte header [refcount:i32][length:i32]. Length() probe at 0x14930 returns 0 when nil.",
+          "edit_composition_offset": "0x38",
+          "edit_composition_kind": "PAnsiString IME composition buffer. Empty in steady state; only non-nil during active CJK composition. NOT the typed text.",
+          "edit_cursor_offset": "0x3c",
+          "edit_cursor_kind": "u32 cursor / insertion index into +0x34",
+          "edit_selection_offset": "0x48",
+          "edit_selection_kind": "u32 selection-anchor flag (0 = no selection, 1 = active drag-select)",
+          "edit_class": "TDncGulimEdit",
+          "edit_vmt_va": "0x001858E8",
+          "edit_class_name_string_va": "0x0018596E",
+          "edit_instance_size": 132
+        },
+        "alloc_trigger": {
+          "scheme": "lazy",
+          "details": "Constructor calls _LStrInit on +0x34 and +0x38 -> both nil. Width-cursor /+0x3c, +0x48 zeroed. First WM_CHAR or programmatic SetText call triggers _LStrAsg on +0x34 which calls _NewAnsiString to alloc the long-string header+data on the Delphi heap. Empty edit -> [+0x34]==nil, NOT a zeroed inline buffer. This is why Gate 2's offset-probe write of \"Test99\" to candidate offsets did nothing: there is no inline buffer to overwrite, +0x34 must hold a valid PAnsiString *pointer*."
+        },
+        "setter": {
+          "va": "0x0018D946",
+          "kind": "Delphi method, register cv: eax=Self (Edit instance), edx=PAnsiString src",
+          "body_summary": "Writes 0 to [+0x3c] and [+0x48], _LStrClr([+0x38]), _LStrAsg([+0x34], src), then virtual call [vmt+0x60] (Invalidate/Repaint). This is the published 'Text :=' setter and is the cleanest entry point for non-keystroke text injection.",
+          "rtl_helpers_used": {
+            "0x000146E8": "_LStrClr (clear PAnsiString)",
+            "0x00014724": "_LStrAsg (PAnsiString assignment with refcount)",
+            "0x00014930": "_LStrLen (Length(AnsiString))",
+            "0x00014A00": "_LStrCatN (concat N strings)",
+            "0x0006D2C0": "Copy(AnsiString, Index, Count)"
+          }
+        },
+        "validator_constants": {
+          "forbidden_string_table_va": "0x0014A628",
+          "len_min": 3,
+          "len_max": 12,
+          "ascii_allowed_ranges": "0x00-0x7E excluding 0xA1-0xDF (already filtered earlier); hex digits 0-9 a-f A-F flagged",
+          "korean_hangul_lead_hi_range": "0x81-0xFE",
+          "korean_hangul_lead_lo_range": "varies per region (decoded at 0x14a2f9..0x14a443)"
+        },
+        "network_sends": [
+          "idx=1 Submit -> 0xD5 (56-byte payload, V2 schema in CLAUDE.md) when name validates",
+          "idx=2 Cancel -> none"
+        ],
+        "confidence": "high"
+      },
+      "status": "verified_partial",
+      "verified_by": "wave 2c smoke 2026-04-29 (idx=1 cautious / idx=2 verified)",
+      "notes": "No VM parity recording \u2014 happy-path recording does not exercise CharCreate. Need new VM recording: open Create modal, type name, submit.",
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0x139424",
+        "handler_code_va": "0x0014A024",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0x138e00"
+      }
+    },
+    "14a668": {
+      "name": "CharCreate_StyleButton_Dispatcher",
+      "class": "TDncStyleButton",
+      "owner_form": "TDncCharCreateForm",
+      "owner_chain": "TDncCharCreateForm/TDncCharCreateFormStub[idx=1]/TDncStyleButton[idx=3..8]",
+      "effect": "Generic prev/next-arrow dispatcher for the 3 toggle groups in Char Create. ALL 6 ARROWS share this code; behaviour selected by [Sender+0x24] (which maps to slot index 0..5). State writes to TDncCharCreateForm instance at +0xB0 (hair byte: (style-1)*10 + (color-1)) and +0xB1 (sex byte: bit7=male). Validated 2026-04-29 by snap-before/invoke/snap-after on each of the 6 buttons.",
+      "sub_handlers": {
+        "idx=3": {
+          "name": "CharCreate_Sex_Prev",
+          "status": "verified",
+          "verified_by": "smoke 2026-04-29",
+          "notes": "rect (295,48)-(305,60). Toggles +0xB1: 0x80<->0x00. Verified at heap 0x01cb2ed0."
+        },
+        "idx=4": {
+          "name": "CharCreate_Sex_Next",
+          "status": "verified",
+          "verified_by": "smoke 2026-04-29",
+          "notes": "rect (393,48)-(403,60). Toggles +0xB1: 0x00<->0x80. Verified at heap 0x01cb2f18."
+        },
+        "idx=5": {
+          "name": "CharCreate_HairStyle_Prev",
+          "status": "verified",
+          "verified_by": "smoke 2026-04-29",
+          "notes": "rect (295,75)-(305,87). Modifies +0xB0 (e.g., 0x00 wrap to 0x14 = style=3, color=1). Verified at heap 0x01cb2f60."
+        },
+        "idx=6": {
+          "name": "CharCreate_HairStyle_Next",
+          "status": "verified",
+          "verified_by": "smoke 2026-04-29",
+          "notes": "rect (393,75)-(403,87). Modifies +0xB0 (e.g., 0x14->0x00 = style=1, color=1). Verified at heap 0x01cb2fa8."
+        },
+        "idx=7": {
+          "name": "CharCreate_HairColor_Prev",
+          "status": "verified",
+          "verified_by": "smoke 2026-04-29",
+          "notes": "rect (295,103)-(305,115). Modifies +0xB0 (e.g., 0x00->0x02 = style=1, color=3). Verified at heap 0x01cb2ff0."
+        },
+        "idx=8": {
+          "name": "CharCreate_HairColor_Next",
+          "status": "verified",
+          "verified_by": "smoke 2026-04-29",
+          "notes": "rect (393,103)-(403,115). Modifies +0xB0 (e.g., 0x02->0x00 = style=1, color=1). Verified at heap 0x01cb3038."
+        }
+      },
+      "status": "verified",
+      "verified_by": "smoke 2026-04-29 (all 6 buttons; lldb mem-snap before/after diff)",
+      "notes": "No VM parity recording \u2014 happy-path recording does not exercise CharCreate. Need new VM recording cycling each style button.",
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0x139a68",
+        "handler_code_va": "0x0014A668",
+        "owner_vmt_section": "CODE",
+        "owner_vmt_file_offset": "0x138e00"
+      }
+    },
+    "18c7bc": {
+      "name": "Generic_TDncCloseBtn_Dispatcher",
+      "class": "TDncCloseBtn",
+      "owner_form": "various (TDncServerSelectForm, TDncCharCreateForm, TDncCharCreateFormStub, TDncCharSelectShow)",
+      "effect": "Generic [X] close-button handler shared across all 4 modal-bearing forms. Wave 2c smoke 2026-04-29: invoked the TDncCharCreateForm-instance CloseBtn (heap class confirmed via _resolve_class_and_method: class=TDncCloseBtn, code=0x18c7bc). DXRender stayed alive, no network, no DB change. Pure local form-close handler (likely class-default Delphi vmt-installed close path). CAVEAT: invoking on TDncServerSelectForm root (when it's the topmost UI at app start) may fall through to client termination like 0x1527dc \u2014 only the child-modal instance is verified safe.",
+      "static_analysis": {
+        "decomp_summary": "Function body NOT decompiled. VA is in the 0x18Cxxx range \u2014 same range as TDncWidgetList helpers (e.g. FUN_0018cd1c at 0x18cd1c is the NormBtn factory used in the TDncCharSelectShow constructor). Likely a class-level Delphi base-class CloseBtn handler in TDncCloseBtn's vmt. Same-VA assignment to 4 separate CloseBtn instances across unrelated forms strongly suggests class-default (vmt-installed), not per-form-installed.",
+        "calls": [
+          "unknown \u2014 likely calls form's Close()/Hide() vmt slot"
+        ],
+        "network_sends": [
+          "unlikely \u2014 'Close' is usually pure UI"
+        ],
+        "confidence": "medium"
+      },
+      "status": "verified_partial",
+      "verified_by": "wave 2c smoke 2026-04-29 (TDncCharCreateForm child instance only)",
+      "notes": "Only the child-modal instance verified safe. Root-modal instance (TDncServerSelectForm at app start) untested \u2014 likely terminates client. No VM parity recording for any close-button click.",
+      "file_offsets": {
+        "binary": "DXRender.exe",
+        "handler_code_section": "CODE",
+        "handler_code_file_offset": "0x17bbbc",
+        "handler_code_va": "0x0018C7BC"
+      }
+    }
+  },
+  "class_offsets": {
+    "_comment": "Per-class TMethod offset table (mirrors pipeline/dom_actions.py ONCLICK_OFFSETS). For class C, *(instance+offset) is the OnClick code VA, *(instance+offset+4) is the data ptr. Call cv: EAX=data, EDX=Sender(=instance), ECX=0.",
+    "TDncNormBtn": "0x80",
+    "TDncCloseBtn": "0x48",
+    "TDncStyleButton": "0x38",
+    "TDncCharListItem": "0x40",
+    "TDncItemListbox": "0x98"
+  },
+  "form_watcher_fields": {
+    "_comment": "Known instance-struct field offsets confirmed via the form-watcher methodology (snap before/diff after). All offsets validated either via on-Mac lldb snap-diff or VM-side MemProcFS mining of recordings/jureah-raito-run7. See CLAUDE.md 'Form-watcher methodology' worked-examples table.",
+    "TDncServerSelectForm": [
+      {
+        "offset": "+0x18",
+        "type": "u8",
+        "meaning": "form active -> advanced toggle (0x01->0x00 when OK pressed)",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0002->0003"
+      },
+      {
+        "offset": "+0x1A",
+        "type": "u8",
+        "meaning": "form active -> advanced toggle (0x00->0x01 when OK pressed)",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0002->0003"
+      }
+    ],
+    "TDncCharSelectShow": [
+      {
+        "offset": "+0x18",
+        "type": "u8",
+        "meaning": "form-active flag (cleared 0x01->0x00 on Start Game advance to in-world)",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0007->0008"
+      },
+      {
+        "offset": "+0x7C",
+        "type": "u8",
+        "meaning": "hover/once-clicked flag (set 0x00->0x01 on OK->CharSelect transition; cleared on 1st of slot double-click). Distinct from +0x7D.",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0002->0003 + snap_0006->0007"
+      },
+      {
+        "offset": "+0x7D",
+        "type": "u8",
+        "meaning": "active char slot index (0=Raito, 1=Blu, 2=Rez, ...). Wraps; no clamping.",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0003->0004->0005->0006 (0->1->2->0)"
+      }
+    ],
+    "TDncCharCreateForm": [
+      {
+        "offset": "+0xB0",
+        "type": "u8",
+        "meaning": "hair byte = (style-1)*10 + (color-1). Confirmed: 0x00 (s1,c1) <-> 0x14 (s3,c1) via StyleButton idx=5/6; 0x00 <-> 0x02 (s1,c3) via idx=7/8.",
+        "validated": "smoke 2026-04-29 lldb mem-diff"
+      },
+      {
+        "offset": "+0xB1",
+        "type": "u8",
+        "meaning": "sex byte: bit7=1 male (default 0x80), bit7=0 female (0x00). Wire-format byte 31 = (sex<<7) | class.",
+        "validated": "smoke 2026-04-29 lldb mem-diff via StyleButton idx=3/4"
+      }
+    ],
+    "TDncRootWidget": [
+      {
+        "offset": "+0x0C..+0x0F",
+        "type": "u32 ptr",
+        "meaning": "active-widget pointer (changes on screen transitions; in-world bound widget vs char-select bound widget).",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0007->0008 (0x0292ec08->0x07aef240)"
+      },
+      {
+        "offset": "+0x50",
+        "type": "u8",
+        "meaning": "state flag (clears 0x01->0x00 on entering world).",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0007->0008"
+      },
+      {
+        "offset": "+0x52",
+        "type": "u8",
+        "meaning": "state flag (clears 0x01->0x00 on entering world; set 0x00->0x01 on slot-click during char-select).",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0003->0004 + snap_0007->0008"
+      }
+    ],
+    "TDncGameMainMenu": [
+      {
+        "offset": "+0x4C",
+        "type": "u8",
+        "meaning": "in-world activation flag (0x00 -> 0x02 on entering world).",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0007->0008"
+      }
+    ],
+    "TMainForm": [
+      {
+        "offset": "+0x44",
+        "type": "u8",
+        "meaning": "set 0x00 -> 0x01 on entering world.",
+        "validated": "wave 2b mining of jureah-raito-run7 snap_0007->0008 (instance @0x0297e530)"
+      }
+    ],
+    "TDncNPCDialogU": [
+      {
+        "offset": "+0x04",
+        "type": "u32",
+        "meaning": "unknown — observed 0x0000000B; candidate NPC id or dialog state counter. Did not change between two different NPCs in phase3_walk_v5."
+      },
+      {
+        "offset": "+0x7C",
+        "type": "u8",
+        "meaning": "unknown flag — observed 0x01 both open and closed. May reflect widget active state."
+      }
+    ]
+  },
+  "refuted_offsets": {
+    "_comment": "Hypothesized offsets from earlier Wave 1 work that were REFUTED by subsequent dynamic mining. Kept here so future RE doesn't re-add them.",
+    "TDncServerSelectForm": [
+      {
+        "offset": "+0x0C..+0x0F",
+        "type": "u32 ptr",
+        "claimed_meaning": "last-clicked slot widget",
+        "refuted_by": "wave 2b mining of jureah-raito-run7 (snap_0000->0001 + snap_0001->0002 \u2014 zero diff in form's first 0x80 bytes during row-select transitions). Row-select state lives inside the TDncItemListbox child or its backing-data list, NOT in TDncServerSelectForm."
+      },
+      {
+        "offset": "+0x39",
+        "type": "u8",
+        "claimed_meaning": "dirty-once flag set on first manual row click",
+        "refuted_by": "wave 2b mining of jureah-raito-run7 (zero byte change at +0x39 during row-select transitions)."
+      }
+    ]
+  },
+  "globals": {
+    "_comment": "Known global-data VAs referenced by handlers (not OnClick handlers themselves).",
+    "1c1678": {
+      "name": "g_selected_char_slot_ptr",
+      "type": "u32 ptr -> u8",
+      "effect": "Selected char slot byte; written by 0xf236c (CharSlot_Select_InnerBtn) from [Sender+0x24]. Mirrored by TDncCharSelectShow +0x7D in the form instance."
+    },
+    "155a44": {
+      "name": "ConnectToSelectedServer",
+      "type": "function",
+      "effect": "Called by 0x152708 (ServerSelect_OK_Connect)"
+    },
+    "152f30": {
+      "name": "SendD3Handshake",
+      "type": "function",
+      "effect": "Called by 0x152708 (ServerSelect_OK_Connect)"
+    }
+  }
+}
