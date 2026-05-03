@@ -141,7 +141,23 @@ SRCCOPY = 0x00CC0020
 # ---------------------------------------------------------------------------
 # CV template-matching (click accuracy via OpenCV)
 
-CV_MATCH_THRESHOLD = 0.85
+CV_DEBUG_DIR = None  # set via --cv-debug-dir to dump per-click diagnostic PNGs
+# UI elements can render up to ~20 px off between vmconnect (recording)
+# and XenClient native (replay) due to different rendering pipelines,
+# so threshold has to tolerate that. The constrained search window
+# (CV_SEARCH_RADIUS_PX) already prevents wrong-sibling matches.
+CV_MATCH_THRESHOLD = 0.65
+# Crop the haystack to recorded_xy ± CV_SEARCH_RADIUS_PX before matching.
+# Makes sibling-button matches physically impossible since the wrong
+# element isn't in the search region. CV becomes a fine refiner —
+# trust whatever it finds within the window above threshold.
+CV_SEARCH_RADIUS_PX = 60
+# Mask the center NxN of the template before matching. vmconnect renders
+# the guest cursor into the framebuffer at the click point, so the
+# template always has a cursor sprite at its center; the live haystack
+# does not. Masking that region prevents cursor mismatch from polluting
+# the score and biasing the match location.
+CV_CURSOR_MASK_PX = 28
 PATCH_SIZE = 96
 
 _cv2 = None
@@ -225,24 +241,58 @@ def screenshot_window(hwnd: int):
     return arr[:, :, :3].copy()  # BGRA -> BGR
 
 
-def cv_match_patch(hwnd: int, patch_path: str, threshold: float = CV_MATCH_THRESHOLD):
-    """Match patch against current window. Returns (ok, score, client_x, client_y).
+def cv_match_patch(hwnd: int, patch_path: str, rec_cx: int, rec_cy: int,
+                   threshold: float = CV_MATCH_THRESHOLD):
+    """Match patch against the live window, near the recorded click point.
 
-    client_x/y are CLIENT-AREA coords of the matched patch CENTER. Caller
-    converts to screen coords via the existing window math.
+    Crops the haystack to a search window around (rec_cx, rec_cy) so CV
+    can only refine within ±CV_SEARCH_RADIUS_PX. Masks the cursor area
+    in the template so the guest cursor sprite at patch center doesn't
+    pollute the score.
+
+    Returns (ok, score, client_x, client_y) where client_x/y are CLIENT-
+    AREA coords of the matched patch CENTER.
     """
     cv2, np = _load_cv2()
     template = cv2.imread(patch_path, cv2.IMREAD_COLOR)
     if template is None:
         return False, 0.0, 0, 0
     haystack = screenshot_window(hwnd)
+    hh, hw = haystack.shape[:2]
     th, tw = template.shape[:2]
-    if haystack.shape[0] < th or haystack.shape[1] < tw:
+    if hh < th or hw < tw:
         return False, 0.0, 0, 0
-    res = cv2.matchTemplate(haystack, template, cv2.TM_CCOEFF_NORMED)
+
+    # Crop haystack to a search window around the recorded click. The
+    # template is tw×th, so for top-left positions to fit the template
+    # we need the haystack region to be at least tw×th. Use the recorded
+    # click as the search center and expand by CV_SEARCH_RADIUS_PX
+    # plus the template half-size.
+    half_tw, half_th = tw // 2, th // 2
+    sx0 = max(0, rec_cx - half_tw - CV_SEARCH_RADIUS_PX)
+    sy0 = max(0, rec_cy - half_th - CV_SEARCH_RADIUS_PX)
+    sx1 = min(hw, rec_cx + half_tw + CV_SEARCH_RADIUS_PX)
+    sy1 = min(hh, rec_cy + half_th + CV_SEARCH_RADIUS_PX)
+    if sx1 - sx0 < tw or sy1 - sy0 < th:
+        return False, 0.0, 0, 0
+    region = haystack[sy0:sy1, sx0:sx1]
+
+    # Mask the cursor area at template center: 255 = use this pixel,
+    # 0 = ignore. cv2.matchTemplate broadcasts a single-channel mask
+    # against the BGR template.
+    mask = np.full((th, tw), 255, dtype=np.uint8)
+    m = CV_CURSOR_MASK_PX
+    my0 = max(0, half_th - m // 2)
+    my1 = min(th, half_th + m // 2)
+    mx0 = max(0, half_tw - m // 2)
+    mx1 = min(tw, half_tw + m // 2)
+    mask[my0:my1, mx0:mx1] = 0
+
+    res = cv2.matchTemplate(region, template, cv2.TM_CCOEFF_NORMED, mask=mask)
     _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(res)
-    cx = max_loc[0] + tw // 2
-    cy = max_loc[1] + th // 2
+    # Match center, in HAYSTACK (full client) coordinates.
+    cx = sx0 + max_loc[0] + half_tw
+    cy = sy0 + max_loc[1] + half_th
     return (max_val >= threshold), float(max_val), int(cx), int(cy)
 
 
@@ -461,21 +511,31 @@ def find_start_index(events: List[dict], mode: str) -> int:
     return len(events)
 
 
+def map_client(fx: float, fy: float, cw: int, ch: int,
+               vm_w: int, vm_h: int, win_w: int, win_h: int,
+               top_offset: int, left_offset: int):
+    """Map recorded fractional vmconnect coords → CLIENT-area pixel of the
+    target window. No Y_CORRECTION, no win_x/win_y offsets — pure
+    geometry. Used for both screen-space click math and CV haystack
+    indexing so they share the same reference frame."""
+    game_x = fx * cw - left_offset
+    game_y = fy * ch - top_offset
+    game_x_norm = max(0.0, min(1.0, game_x / float(vm_w)))
+    game_y_norm = max(0.0, min(1.0, game_y / float(vm_h)))
+    cx = int(round(game_x_norm * win_w))
+    cy = int(round(game_y_norm * win_h))
+    return cx, cy
+
+
 def map_coords(fx: float, fy: float, cw: int, ch: int,
                vm_w: int, vm_h: int,
                win_x: int, win_y: int, win_w: int, win_h: int,
                top_offset: int, left_offset: int,
                x_correction: int, y_correction: int):
     """Apply offsets and map fractional vmconnect coords → screen pixel."""
-    game_x = fx * cw - left_offset
-    game_y = fy * ch - top_offset
-    game_x_norm = game_x / float(vm_w)
-    game_y_norm = game_y / float(vm_h)
-    game_x_norm = max(0.0, min(1.0, game_x_norm))
-    game_y_norm = max(0.0, min(1.0, game_y_norm))
-    sx = win_x + int(round(game_x_norm * win_w)) + x_correction
-    sy = win_y + int(round(game_y_norm * win_h)) + y_correction
-    return sx, sy
+    cx, cy = map_client(fx, fy, cw, ch, vm_w, vm_h, win_w, win_h,
+                        top_offset, left_offset)
+    return win_x + cx + x_correction, win_y + cy + y_correction
 
 
 _BTN_FLAGS = {
@@ -662,6 +722,10 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
     # delta between consecutive events.
     last_rec_ns = first_with_t["t_wall_ns"]
     last_local_ns = time.monotonic_ns()
+    # Track CV-adjusted client coords per button from the last 'down' event
+    # so the matching 'up' event clicks at the same screen position. Many
+    # UIs require down/up at the same pixel for the click to register.
+    last_cv_xy_by_btn: Dict[str, Tuple[int, int]] = {}
 
     for ev in timeline:
         if stop_flag[0]:
@@ -759,46 +823,90 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
             # the live window and use the match center for the click target.
             cv_client_xy = None  # (cx, cy) in client px, or None
             cv_patch_name = ev.get("cv_patch")
+            # 'up' events have no patch; reuse the down event's CV-adjusted
+            # position so the click registers at a single pixel.
+            if ev.get("state") == "up":
+                cv_client_xy = last_cv_xy_by_btn.get(ev.get("btn"))
             if patches_dir and cv_patch_name and ev.get("state") == "down":
                 patch_path = os.path.join(patches_dir, cv_patch_name)
                 if os.path.isfile(patch_path):
-                    ok, score, mcx, mcy = cv_match_patch(hwnd, patch_path)
-                    rec_cx = int(round(ev["fx"] * win_w))
-                    rec_cy = int(round(ev["fy"] * win_h))
+                    rec_cx, rec_cy = map_client(
+                        ev["fx"], ev["fy"], ev["cw"], ev["ch"],
+                        vm_w, vm_h, win_w, win_h, top_offset, left_offset)
+                    ok, score, mcx, mcy = cv_match_patch(hwnd, patch_path, rec_cx, rec_cy)
+                    dx = mcx - rec_cx
+                    dy = mcy - rec_cy
+                    shift_px = (dx * dx + dy * dy) ** 0.5
+                    if CV_DEBUG_DIR:
+                        try:
+                            cv2_dbg, np_dbg = _load_cv2()
+                            os.makedirs(CV_DEBUG_DIR, exist_ok=True)
+                            haystack = screenshot_window(hwnd)
+                            ann = haystack.copy()
+                            # Red = recorded, Green = CV match, Blue circle = search window
+                            cv2_dbg.rectangle(ann,
+                                (max(0, rec_cx - CV_SEARCH_RADIUS_PX - 48),
+                                 max(0, rec_cy - CV_SEARCH_RADIUS_PX - 48)),
+                                (rec_cx + CV_SEARCH_RADIUS_PX + 48,
+                                 rec_cy + CV_SEARCH_RADIUS_PX + 48),
+                                (255, 200, 0), 1)
+                            cv2_dbg.circle(ann, (rec_cx, rec_cy), 6, (0, 0, 255), 2)
+                            cv2_dbg.circle(ann, (mcx, mcy), 4, (0, 255, 0), 2)
+                            label = (f"seq={ev.get('seq')} score={score:.2f} "
+                                     f"shift=({dx},{dy}) ok={ok}")
+                            cv2_dbg.putText(ann, label, (10, 24),
+                                cv2_dbg.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                            seq = ev.get('seq')
+                            cv2_dbg.imwrite(os.path.join(CV_DEBUG_DIR,
+                                f"{seq}_haystack.png"), ann)
+                            patch_img = cv2_dbg.imread(patch_path)
+                            if patch_img is not None:
+                                cv2_dbg.imwrite(os.path.join(CV_DEBUG_DIR,
+                                    f"{seq}_patch.png"), patch_img)
+                        except Exception as _e:
+                            print(f"[cv-debug] dump failed seq={ev.get('seq')}: {_e}",
+                                  file=sys.stderr)
                     if ok:
-                        dx = mcx - rec_cx
-                        dy = mcy - rec_cy
+                        # Search is already constrained to ±CV_SEARCH_RADIUS_PX;
+                        # any match above threshold within that window is the
+                        # right element (siblings aren't in scope). Trust it.
                         print(f"[cv-match] OK seq={ev.get('seq')} "
                               f"score={score:.2f} shift=({dx},{dy})",
                               file=sys.stderr)
                         cv_client_xy = (mcx, mcy)
+                        last_cv_xy_by_btn[ev.get("btn")] = (mcx, mcy)
                     else:
-                        print(f"[cv-match] FAIL seq={ev.get('seq')} "
-                              f"score={score:.2f} recorded=({rec_cx},{rec_cy})",
+                        # Below threshold — fall back to recorded coords.
+                        # Common when the patch contains transient state
+                        # (cursor, animation frame, hover highlight).
+                        print(f"[cv-match] LOW seq={ev.get('seq')} "
+                              f"score={score:.2f} shift=({dx},{dy}) "
+                              f"recorded=({rec_cx},{rec_cy}); using recorded coords",
                               file=sys.stderr)
-                        stop_flag[0] = True
-                        return
+                        # Clear so paired 'up' also uses recorded coords.
+                        last_cv_xy_by_btn.pop(ev.get("btn"), None)
             if click_mode == "postmessage":
                 btn = ev.get("btn")
                 state = ev.get("state")
                 if (btn, state) not in _PM_BTN_MSGS:
                     continue
                 if cv_client_xy is not None:
+                    # CV match center is the exact pixel — bypass coord corrections.
                     cx, cy = cv_client_xy
-                    cy += y_correction
-                    cx += x_correction
                 else:
                     cx = int(round(ev["fx"] * win_w))
-                    cy = int(round(ev["fy"] * win_h))
+                    cy = int(round(ev["fy"] * win_h)) + y_correction
+                    cx += x_correction
                 print(f"[click] seq={ev.get('seq')} {btn}-{state} "
                       f"fx={ev['fx']:.4f} fy={ev['fy']:.4f} -> client=({cx},{cy})",
                       file=sys.stderr)
                 post_click(hwnd, btn, state, cx, cy)
             else:
                 if cv_client_xy is not None:
+                    # CV match center is the exact pixel — bypass coord corrections.
                     cx, cy = cv_client_xy
-                    sx = win_x + cx + x_correction
-                    sy = win_y + cy + y_correction
+                    sx = win_x + cx
+                    sy = win_y + cy
                 else:
                     sx, sy = map_coords(ev["fx"], ev["fy"], ev["cw"], ev["ch"],
                                         vm_w, vm_h, win_x, win_y, win_w, win_h,
@@ -873,7 +981,12 @@ def main() -> int:
                          "virtual-screen coords. 'postmessage' posts WM_*BUTTON* "
                          "messages directly to the target HWND with "
                          "client-relative coords (no cursor movement).")
+    ap.add_argument("--cv-debug-dir", default=None,
+                    help="if set, dump per-click haystack+patch PNGs here for "
+                         "visual diagnosis of CV matches/misses.")
     args = ap.parse_args()
+    global CV_DEBUG_DIR
+    CV_DEBUG_DIR = args.cv_debug_dir
 
     if not os.path.isfile(args.recording):
         print(f"recording not found: {args.recording}", file=sys.stderr)

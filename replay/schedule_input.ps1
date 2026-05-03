@@ -9,7 +9,8 @@ param(
     [string]$CtrlHost = "",
     [int]$CtrlPort = 18999,
     [int]$StopAtSeq = -1,
-    [ValidateSet("sendinput","postmessage")] [string]$ClickMode = "sendinput"
+    [ValidateSet("sendinput","postmessage")] [string]$ClickMode = "sendinput",
+    [string]$CvDebugDir = ""
 )
 $ErrorActionPreference = "Stop"
 $replayDir = "C:\Users\RC3\replay"
@@ -25,6 +26,7 @@ if (-not (Test-Path $pythonw)) { throw "missing $pythonw (embedded distro should
 $argLine = "`"$replayer`" `"$jsonl`" --window-title `"$WindowTitle`" --start-from $StartFrom --x-correction $XCorrection --y-correction $YCorrection --left-offset $LeftOffset --click-mode $ClickMode"
 if ($TopOffset -ge 0) { $argLine += " --top-offset $TopOffset" }
 if ($CtrlHost -ne "") { $argLine += " --ctrl-host $CtrlHost --ctrl-port $CtrlPort" }
+if ($CvDebugDir -ne "") { $argLine += " --cv-debug-dir `"$CvDebugDir`"" }
 
 $action = New-ScheduledTaskAction -Execute $pythonw -Argument $argLine -WorkingDirectory $replayDir
 $principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive

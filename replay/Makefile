@@ -114,6 +114,14 @@ fullscreen:
 run: fullscreen
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$action = New-ScheduledTaskAction -Execute \"$(CLIENT_REMOTE_EXE)\" -Argument \"-I $(MAC_IP) -ID $(TOKEN)\" -WorkingDirectory \"$(CLIENT_REMOTE_DIR)\"; $$principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive; $$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 8); $$task = New-ScheduledTask -Action $$action -Principal $$principal -Settings $$settings; Register-ScheduledTask -TaskName xen-launch -InputObject $$task -Force | Out-Null; Start-ScheduledTask -TaskName xen-launch; Start-Sleep -Seconds 2; Get-Process DXRender,GLRender,XenClient -ErrorAction SilentlyContinue | Select-Object Name,Id,SessionId | Format-Table -AutoSize | Out-String; exit 0"'
 
+cv-debug-pull:
+	@mkdir -p $(SESSIONS)/cv_debug_$(RECORDING_ID)
+	-$(SCP) -r $(RC3):replay/cv_debug/* $(SESSIONS)/cv_debug_$(RECORDING_ID)/
+	@echo "[cv-debug-pull] -> $(SESSIONS)/cv_debug_$(RECORDING_ID)/"
+
+cv-debug-clean:
+	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Remove-Item -Recurse -Force $(REPLAY_REMOTE)/cv_debug -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Path $(REPLAY_REMOTE)/cv_debug | Out-Null"'
+
 kill: server-stop
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName xen-replay-input -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-replay-input -Confirm:$$false -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-launch -Confirm:$$false -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-resize -Confirm:$$false -ErrorAction SilentlyContinue; Get-Process XenClient,DXRender,GLRender -ErrorAction SilentlyContinue | Stop-Process -Force; Get-CimInstance Win32_Process -Filter \"Name = '"'"'python.exe'"'"' OR Name = '"'"'pythonw.exe'"'"'\" | Where-Object { $$_.CommandLine -match '"'"'input_replayer'"'"' } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }; exit 0"'
 	@echo "[kill] RC3 client + input_replayer + scheduled tasks + Mac v2_server stopped"
@@ -125,7 +133,7 @@ resize:
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$action = New-ScheduledTaskAction -Execute powershell.exe -Argument \"-NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/resize_window.ps1\" -WorkingDirectory $(REPLAY_REMOTE); $$principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive; $$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; $$task = New-ScheduledTask -Action $$action -Principal $$principal -Settings $$settings; Register-ScheduledTask -TaskName xen-resize -InputObject $$task -Force | Out-Null; Start-ScheduledTask -TaskName xen-resize; Start-Sleep -Seconds 3; Get-Content $(REPLAY_REMOTE)/resize.log -ErrorAction SilentlyContinue"'
 
 input:
-	@$(SSH) $(RC3) 'powershell -NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/schedule_input.ps1 -RecordingId $(RECORDING_ID) -XCorrection $(X_CORRECTION) -YCorrection $(Y_CORRECTION) -CtrlHost $(MAC_IP) -ClickMode $(CLICK_MODE)'
+	@$(SSH) $(RC3) 'powershell -NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/schedule_input.ps1 -RecordingId $(RECORDING_ID) -XCorrection $(X_CORRECTION) -YCorrection $(Y_CORRECTION) -CtrlHost $(MAC_IP) -ClickMode $(CLICK_MODE) $(if $(CV_DEBUG),-CvDebugDir "$(REPLAY_REMOTE)/cv_debug",)'
 
 input-stop:
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName xen-replay-input -ErrorAction SilentlyContinue; exit 0"'
