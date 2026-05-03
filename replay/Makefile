@@ -47,7 +47,7 @@ JSONL     := $(SESSIONS)/recording_$(RECORDING_ID).jsonl
 
 .PHONY: help server server-bg server-stop status rc3-up deploy fullscreen \
         run kill input input-stop replay clean-tasks list-sessions pull-sessions \
-        install-cv2
+        install-cv2 cv-calibrate
 
 help:
 	@echo "Phase 2 targets:"
@@ -65,8 +65,9 @@ help:
 	@echo "  replay       full pipeline: server-bg + deploy + fullscreen + run + sleep + input"
 	@echo "  clean-tasks  unregister scheduled tasks (xen-launch, xen-replay-input)"
 	@echo "  list-sessions   list recordings on RC ($(RC_IP))"
-	@echo "  pull-sessions   scp recording_$(RECORDING_ID).{jsonl,manifest.json} from RC -> sessions/"
+	@echo "  pull-sessions   scp ALL recording_*.{jsonl,manifest.json,pcap} + _patches/ dirs from RC -> sessions/"
 	@echo "  install-cv2     download Win cp311 wheels (cv2,numpy,Pillow) on Mac, scp + offline pip install on RC3"
+	@echo "  cv-calibrate    SEQ=<n> RECORDING_ID=<id>: run replayer's CV match against live RC3 game window; pull annotated PNG to /tmp/cv_calibrate_<seq>.png"
 
 server:
 	@pkill -f 'v2_server.py' 2>/dev/null || true
@@ -119,6 +120,19 @@ cv-debug-pull:
 	-$(SCP) -r $(RC3):replay/cv_debug/* $(SESSIONS)/cv_debug_$(RECORDING_ID)/
 	@echo "[cv-debug-pull] -> $(SESSIONS)/cv_debug_$(RECORDING_ID)/"
 
+# Calibrate the replayer's CV pipeline for a single recorded click. Runs
+# cv_calibrate.py on RC3 — same Python, same input_replayer.py, same
+# screenshot_window/cv_match_patch — so the annotated PNG reflects what
+# the replayer would actually do for that event.
+#
+# Usage: make cv-calibrate RECORDING_ID=mage-v4-aoe-with-chainblock SEQ=276
+cv-calibrate:
+	@test -n "$(SEQ)" || (echo "[cv-calibrate] usage: make cv-calibrate RECORDING_ID=<id> SEQ=<n> [CURSOR_MASK_PX=<n>]"; exit 1)
+	$(SCP) cv_calibrate.py cv_calibrate.ps1 input_replayer.py spawn_parser.py $(RC3):replay/
+	@$(SSH) $(RC3) 'powershell -NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/cv_calibrate.ps1 -RecordingId $(RECORDING_ID) -Seq $(SEQ) -CursorMaskPx $(if $(CURSOR_MASK_PX),$(CURSOR_MASK_PX),0)'
+	$(SCP) $(RC3):replay/cv_calibrate_$(SEQ).png /tmp/cv_calibrate_$(SEQ).png
+	@echo "[cv-calibrate] -> /tmp/cv_calibrate_$(SEQ).png"
+
 cv-debug-clean:
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Remove-Item -Recurse -Force $(REPLAY_REMOTE)/cv_debug -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Path $(REPLAY_REMOTE)/cv_debug | Out-Null"'
 
@@ -133,7 +147,7 @@ resize:
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$action = New-ScheduledTaskAction -Execute powershell.exe -Argument \"-NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/resize_window.ps1\" -WorkingDirectory $(REPLAY_REMOTE); $$principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive; $$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; $$task = New-ScheduledTask -Action $$action -Principal $$principal -Settings $$settings; Register-ScheduledTask -TaskName xen-resize -InputObject $$task -Force | Out-Null; Start-ScheduledTask -TaskName xen-resize; Start-Sleep -Seconds 3; Get-Content $(REPLAY_REMOTE)/resize.log -ErrorAction SilentlyContinue"'
 
 screenshot:
-	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$action = New-ScheduledTaskAction -Execute powershell.exe -Argument \"-NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/rc3_screenshot.ps1\" -WorkingDirectory $(REPLAY_REMOTE); $$principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive; $$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries; $$task = New-ScheduledTask -Action $$action -Principal $$principal -Settings $$settings; Register-ScheduledTask -TaskName xen-screenshot -InputObject $$task -Force | Out-Null; Start-ScheduledTask -TaskName xen-screenshot; Start-Sleep -Seconds 2"'
+	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$action = New-ScheduledTaskAction -Execute powershell.exe -Argument \"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/rc3_screenshot.ps1\" -WorkingDirectory $(REPLAY_REMOTE); $$principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive; $$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -Hidden; $$task = New-ScheduledTask -Action $$action -Principal $$principal -Settings $$settings; Register-ScheduledTask -TaskName xen-screenshot -InputObject $$task -Force | Out-Null; Start-ScheduledTask -TaskName xen-screenshot; Start-Sleep -Seconds 3"'
 	$(SCP) $(RC3):replay/rc3_screen.png /tmp/rc3_screen.png
 	@echo "[screenshot] -> /tmp/rc3_screen.png"
 
@@ -170,12 +184,12 @@ list-sessions:
 	@$(SSH) $(RC) 'powershell -NoProfile -Command "Get-ChildItem $(RC_SESSIONS)\\recording_*.jsonl | Sort-Object LastWriteTime -Descending | Select-Object Name,@{N=\"MB\";E={[math]::Round($$_.Length/1MB,2)}},LastWriteTime | Format-Table -AutoSize"'
 
 pull-sessions:
-	@test -n "$(RECORDING_ID)" || (echo "[pull-sessions] usage: make pull-sessions RECORDING_ID=<id>"; exit 1)
-	$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).jsonl' $(SESSIONS)/
-	-$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).manifest.json' $(SESSIONS)/
-	-$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).pcap' $(SESSIONS)/
-	-$(SCP) -r '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID)_patches' $(SESSIONS)/
-	@echo "[pull-sessions] OK: $(RECORDING_ID) -> $(SESSIONS)/"
+	@mkdir -p $(SESSIONS)
+	$(SCP) '$(RC):$(RC_SESSIONS)/recording_*.jsonl' $(SESSIONS)/
+	-$(SCP) '$(RC):$(RC_SESSIONS)/recording_*.manifest.json' $(SESSIONS)/
+	-$(SCP) '$(RC):$(RC_SESSIONS)/recording_*.pcap' $(SESSIONS)/
+	-$(SCP) -r '$(RC):$(RC_SESSIONS)/recording_*_patches' $(SESSIONS)/
+	@echo "[pull-sessions] OK: all recordings + patches -> $(SESSIONS)/"
 
 # RC3 has no internet AND ships the embeddable Python distro (no pip,
 # no ensurepip). Download Windows cp311 wheels (incl. pip itself) on

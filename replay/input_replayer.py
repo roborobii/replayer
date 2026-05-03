@@ -144,23 +144,27 @@ SRCCOPY = 0x00CC0020
 # CV template-matching (click accuracy via OpenCV)
 
 CV_DEBUG_DIR = None  # set via --cv-debug-dir to dump per-click diagnostic PNGs
-# UI elements can render up to ~20 px off between vmconnect (recording)
-# and XenClient native (replay) due to different rendering pipelines,
-# so threshold has to tolerate that. The constrained search window
-# (CV_SEARCH_RADIUS_PX) already prevents wrong-sibling matches.
-CV_MATCH_THRESHOLD = 0.65
-# Crop the haystack to recorded_xy ± CV_SEARCH_RADIUS_PX before matching.
-# Makes sibling-button matches physically impossible since the wrong
-# element isn't in the search region. CV becomes a fine refiner —
-# trust whatever it finds within the window above threshold.
-CV_SEARCH_RADIUS_PX = 60
-# Mask the center NxN of the template before matching. vmconnect renders
-# the guest cursor into the framebuffer at the click point, so the
-# template always has a cursor sprite at its center; the live haystack
-# does not. Masking that region prevents cursor mismatch from polluting
-# the score and biasing the match location.
-CV_CURSOR_MASK_PX = 28
 PATCH_SIZE = 96
+# Match-confidence floor. Above => use CV result and learn its (dx, dy)
+# shift. Below => fall back to recorded coord plus the median shift
+# learned from prior successful matches. No halts. Real UI re-renders
+# score 0.5–0.9; random world textures ~0.3. 0.5 cleanly separates.
+CV_MATCH_THRESHOLD = 0.50
+# When multiple cells lie within this margin of the global max
+# (e.g. duplicate UI sprites rendered identically), break the tie by
+# picking the one closest to (rec_cx, rec_cy).
+CV_PEAK_TIE_MARGIN = 0.05
+# Mask the cursor area at template center: 255 = use this pixel,
+# 0 = ignore. The recorder centers the patch on the click, so the
+# guest cursor sprite is always at template center; the live haystack's
+# cursor is wherever SendInput last moved it. Mask out so the cursor
+# doesn't dominate either the score or the match position.
+CV_CURSOR_MASK_PX = 28
+# Bounded buffer of (dx, dy) from CV-confident matches. The replayer's
+# fallback path uses median(history) as the offset correction when CV
+# can't find the patch in the live frame — self-calibrating per
+# recording/machine, no hardcoded constants.
+SHIFT_HISTORY_MAX = 20
 
 _cv2 = None
 _np = None
@@ -245,57 +249,63 @@ def screenshot_window(hwnd: int):
 
 def cv_match_patch(hwnd: int, patch_path: str, rec_cx: int, rec_cy: int,
                    threshold: float = CV_MATCH_THRESHOLD):
-    """Match patch against the live window, near the recorded click point.
+    """Single-shot CV match: screenshot the live window, run
+    matchTemplate against the recorded 96x96 patch, return the global
+    argmax (with proximity tiebreak among near-equal peaks).
 
-    Crops the haystack to a search window around (rec_cx, rec_cy) so CV
-    can only refine within ±CV_SEARCH_RADIUS_PX. Masks the cursor area
-    in the template so the guest cursor sprite at patch center doesn't
-    pollute the score.
-
-    Returns (ok, score, client_x, client_y) where client_x/y are CLIENT-
-    AREA coords of the matched patch CENTER.
+    Returns (ok, score, client_x, client_y). `ok` indicates score >=
+    threshold; the caller handles the below-threshold path (auto-learn
+    fallback to recorded + median learned shift, no halt).
     """
     cv2, np = _load_cv2()
     template = cv2.imread(patch_path, cv2.IMREAD_COLOR)
     if template is None:
         return False, 0.0, 0, 0
     haystack = screenshot_window(hwnd)
+    return cv_match_in_haystack(haystack, template, rec_cx, rec_cy, threshold)
+
+
+def cv_match_in_haystack(haystack, template, rec_cx: int, rec_cy: int,
+                         threshold: float = CV_MATCH_THRESHOLD):
+    """Pure CV match (no Win32). Shared between the live replayer path
+    (haystack from screenshot_window) and offline calibration tools.
+    `template` is a BGR ndarray.
+    """
+    cv2, np = _load_cv2()
     hh, hw = haystack.shape[:2]
     th, tw = template.shape[:2]
     if hh < th or hw < tw:
         return False, 0.0, 0, 0
-
-    # Crop haystack to a search window around the recorded click. The
-    # template is tw×th, so for top-left positions to fit the template
-    # we need the haystack region to be at least tw×th. Use the recorded
-    # click as the search center and expand by CV_SEARCH_RADIUS_PX
-    # plus the template half-size.
     half_tw, half_th = tw // 2, th // 2
-    sx0 = max(0, rec_cx - half_tw - CV_SEARCH_RADIUS_PX)
-    sy0 = max(0, rec_cy - half_th - CV_SEARCH_RADIUS_PX)
-    sx1 = min(hw, rec_cx + half_tw + CV_SEARCH_RADIUS_PX)
-    sy1 = min(hh, rec_cy + half_th + CV_SEARCH_RADIUS_PX)
-    if sx1 - sx0 < tw or sy1 - sy0 < th:
-        return False, 0.0, 0, 0
-    region = haystack[sy0:sy1, sx0:sx1]
 
-    # Mask the cursor area at template center: 255 = use this pixel,
-    # 0 = ignore. cv2.matchTemplate broadcasts a single-channel mask
-    # against the BGR template.
     mask = np.full((th, tw), 255, dtype=np.uint8)
     m = CV_CURSOR_MASK_PX
-    my0 = max(0, half_th - m // 2)
-    my1 = min(th, half_th + m // 2)
-    mx0 = max(0, half_tw - m // 2)
-    mx1 = min(tw, half_tw + m // 2)
-    mask[my0:my1, mx0:mx1] = 0
+    mask[half_th - m // 2:half_th + m // 2,
+         half_tw - m // 2:half_tw + m // 2] = 0
 
-    res = cv2.matchTemplate(region, template, cv2.TM_CCOEFF_NORMED, mask=mask)
+    res = cv2.matchTemplate(haystack, template, cv2.TM_CCOEFF_NORMED, mask=mask)
+    # TM_CCOEFF_NORMED with mask divides by per-cell variance; low-
+    # variance regions can produce inf/nan. Clip so argmax doesn't pick
+    # a bogus cell.
+    res[~np.isfinite(res)] = -1.0
+
     _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(res)
-    # Match center, in HAYSTACK (full client) coordinates.
-    cx = sx0 + max_loc[0] + half_tw
-    cy = sy0 + max_loc[1] + half_th
-    return (max_val >= threshold), float(max_val), int(cx), int(cy)
+    if max_val < threshold:
+        cx = int(max_loc[0] + half_tw)
+        cy = int(max_loc[1] + half_th)
+        return False, float(max_val), cx, cy
+
+    # Tiebreak among cells within CV_PEAK_TIE_MARGIN of the global max:
+    # pick the one closest to (rec_cx, rec_cy). For unambiguous matches
+    # only the global max itself qualifies, so this collapses to argmax.
+    tie_floor = float(max_val) - CV_PEAK_TIE_MARGIN
+    ys, xs = np.where(res >= tie_floor)
+    centers_x = xs + half_tw
+    centers_y = ys + half_th
+    dx = centers_x.astype(np.int32) - rec_cx
+    dy = centers_y.astype(np.int32) - rec_cy
+    i = int(np.argmin(dx * dx + dy * dy))
+    return True, float(res[ys[i], xs[i]]), int(centers_x[i]), int(centers_y[i])
 
 
 def _enumerate_title_matches(substr: str) -> List[int]:
@@ -739,6 +749,10 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
     # so the matching 'up' event clicks at the same screen position. Many
     # UIs require down/up at the same pixel for the click to register.
     last_cv_xy_by_btn: Dict[str, Tuple[int, int]] = {}
+    # Bounded list of (dx, dy) shifts from CV-confident matches. Drives
+    # the auto-fallback when a match scores below threshold: click at
+    # recorded coord plus median(history). Self-calibrating, no halts.
+    shift_history: List[Tuple[int, int]] = []
     # Last 'down' wall timestamp + client coords per button. If a second
     # 'down' arrives at the same coords within Windows' double-click time,
     # also post WM_*BUTTONDBLCLK to the HWND — SendInput alone doesn't
@@ -863,21 +877,18 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
                             cv2_dbg, np_dbg = _load_cv2()
                             os.makedirs(CV_DEBUG_DIR, exist_ok=True)
                             haystack = screenshot_window(hwnd)
+                            seq = ev.get('seq')
+                            # Raw haystack — for offline cv_calibrate.py
+                            # iteration without re-running the replay.
+                            cv2_dbg.imwrite(os.path.join(CV_DEBUG_DIR,
+                                f"{seq}_haystack_raw.png"), haystack)
                             ann = haystack.copy()
-                            # Red = recorded, Green = CV match, Blue circle = search window
-                            cv2_dbg.rectangle(ann,
-                                (max(0, rec_cx - CV_SEARCH_RADIUS_PX - 48),
-                                 max(0, rec_cy - CV_SEARCH_RADIUS_PX - 48)),
-                                (rec_cx + CV_SEARCH_RADIUS_PX + 48,
-                                 rec_cy + CV_SEARCH_RADIUS_PX + 48),
-                                (255, 200, 0), 1)
                             cv2_dbg.circle(ann, (rec_cx, rec_cy), 6, (0, 0, 255), 2)
                             cv2_dbg.circle(ann, (mcx, mcy), 4, (0, 255, 0), 2)
-                            label = (f"seq={ev.get('seq')} score={score:.2f} "
+                            label = (f"seq={seq} score={score:.2f} "
                                      f"shift=({dx},{dy}) ok={ok}")
                             cv2_dbg.putText(ann, label, (10, 24),
                                 cv2_dbg.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                            seq = ev.get('seq')
                             cv2_dbg.imwrite(os.path.join(CV_DEBUG_DIR,
                                 f"{seq}_haystack.png"), ann)
                             patch_img = cv2_dbg.imread(patch_path)
@@ -888,24 +899,40 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
                             print(f"[cv-debug] dump failed seq={ev.get('seq')}: {_e}",
                                   file=sys.stderr)
                     if ok:
-                        # Search is already constrained to ±CV_SEARCH_RADIUS_PX;
-                        # any match above threshold within that window is the
-                        # right element (siblings aren't in scope). Trust it.
+                        # CV-confident match: click its center and learn
+                        # the shift for future fallbacks.
                         print(f"[cv-match] OK seq={ev.get('seq')} "
                               f"score={score:.2f} shift=({dx},{dy})",
                               file=sys.stderr)
                         cv_client_xy = (mcx, mcy)
-                        last_cv_xy_by_btn[ev.get("btn")] = (mcx, mcy)
+                        shift_history.append((dx, dy))
+                        if len(shift_history) > SHIFT_HISTORY_MAX:
+                            shift_history.pop(0)
                     else:
-                        # Below threshold — fall back to recorded coords.
-                        # Common when the patch contains transient state
-                        # (cursor, animation frame, hover highlight).
-                        print(f"[cv-match] LOW seq={ev.get('seq')} "
-                              f"score={score:.2f} shift=({dx},{dy}) "
-                              f"recorded=({rec_cx},{rec_cy}); using recorded coords",
-                              file=sys.stderr)
-                        # Clear so paired 'up' also uses recorded coords.
-                        last_cv_xy_by_btn.pop(ev.get("btn"), None)
+                        # Below threshold: don't halt, fall back to
+                        # recorded coord plus the median shift learned
+                        # from prior CV-confident matches. Self-
+                        # calibrating, no hardcoded constants.
+                        if shift_history:
+                            dxs = sorted(s[0] for s in shift_history)
+                            dys = sorted(s[1] for s in shift_history)
+                            mdx = dxs[len(dxs) // 2]
+                            mdy = dys[len(dys) // 2]
+                            cv_client_xy = (rec_cx + mdx, rec_cy + mdy)
+                            print(f"[cv-match] FALLBACK seq={ev.get('seq')} "
+                                  f"score={score:.2f} (below "
+                                  f"{CV_MATCH_THRESHOLD:.2f}); learned "
+                                  f"shift=({mdx},{mdy}) -> click=("
+                                  f"{cv_client_xy[0]},{cv_client_xy[1]})",
+                                  file=sys.stderr)
+                        else:
+                            cv_client_xy = (rec_cx, rec_cy)
+                            print(f"[cv-match] FALLBACK seq={ev.get('seq')} "
+                                  f"score={score:.2f} (below "
+                                  f"{CV_MATCH_THRESHOLD:.2f}); cold start, "
+                                  f"using recorded coord ({rec_cx},{rec_cy})",
+                                  file=sys.stderr)
+                    last_cv_xy_by_btn[ev.get("btn")] = cv_client_xy
             if click_mode == "postmessage":
                 btn = ev.get("btn")
                 state = ev.get("state")

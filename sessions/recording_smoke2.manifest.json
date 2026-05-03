@@ -1,0 +1,19 @@
+{
+  "id": "smoke2",
+  "schema": "v2.0",
+  "iface": 4,
+  "client_sha": null,
+  "vm_res": {
+    "w": 1440,
+    "h": 900
+  },
+  "started_wall_ns": 1777799106551978700,
+  "started_mono_ns": 20068171000000,
+  "stopped_wall_ns": 1777799142492979800,
+  "stopped_mono_ns": 20104109000000,
+  "exit_reason": "signal",
+  "files": {
+    "pcap": "recording_smoke2.pcap",
+    "jsonl": "recording_smoke2.jsonl"
+  }
+}

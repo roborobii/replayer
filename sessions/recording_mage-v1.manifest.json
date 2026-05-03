@@ -1,0 +1,19 @@
+{
+  "id": "mage-v1",
+  "schema": "v2.0",
+  "iface": 4,
+  "client_sha": null,
+  "vm_res": {
+    "w": 1440,
+    "h": 900
+  },
+  "started_wall_ns": 1777828430935967300,
+  "started_mono_ns": 49392546000000,
+  "stopped_wall_ns": 1777829673143854600,
+  "stopped_mono_ns": 50634765000000,
+  "exit_reason": "signal",
+  "files": {
+    "pcap": "recording_mage-v1.pcap",
+    "jsonl": "recording_mage-v1.jsonl"
+  }
+}

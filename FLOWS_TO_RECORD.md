@@ -1,7 +1,10 @@
 
 Flows to record:
 
-Server select, Char create, delete, select to in world
+[x] Server select, Char create, delete, select to in world
+[] Storage Unit NPC
+[] Auction NPC
+[]
 
 In world in-map movement and neighboring cross map transitions, Map IDs
 
