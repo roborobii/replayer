@@ -1,100 +1,181 @@
 # replayer
 
-Record a VM game session on the Windows host, replay it offline through
-a stub server + Wine client, end-to-end. Stealth boundary: read-only
-host-side observation (MemProcFS `M:\`, host-vEthernet tshark, host-side
-input hooks) — never any guest hooks, no DLL injection into the guest,
-no writes to guest memory. Recording is invisible to the live server
-the recorded session was talking to.
+Record a VM game session on a Windows host (passive, undetectable to the
+live fan-server), then replay it offline against the same game client
+running on a separate offline Windows machine. Mac orchestrates both
+ends; never installs on or reaches the live server.
 
-## Layout
+`recorder/` and `replay/` will appear at the top level when v2 lands.
+
+## Status
+
+- v1 cherry-picked into `archive/`. The recording at
+  `archive/captures/phase3_walk_v4.jsonl` replays end-to-end via the v1
+  flow (DLL injection + docker stub).
+- v2 design locked. Build tomorrow.
+
+## v2 plan
+
+### Three-machine layout
+
+| Machine | Role | Network |
+|---|---|---|
+| **Mac** (`192.168.12.148`) | Orchestrator. Holds JSONL recordings, the replayer, the cipher logic. | Internet + LAN |
+| **NVIDIA HOST** (`RC@192.168.12.196`) | Recording host. Runs Hyper-V VM "Elf"; the game client inside the VM connects to the live fan-server. | Internet |
+| **Offline RC3** (`RC3@192.168.12.188`) | Replay-only target. ThinkPad T470, no internet, can only reach Mac. SSH/SCP via `~/.ssh/xen_win_ed25519`. | Outbound to Mac only |
+
+### Recording (NVIDIA HOST, undetectable to live server)
+
+VM "Elf" pinned to **1440x900** basic-session (`Set-VMVideo`). DXRender
+**fullscreen inside the VM** — VM-screen coords map directly to game-UI
+coords with no per-event window math.
 
 ```
-recorder/                                 # host-side recording (deploys to C:\Users\RC\recorder\)
-└── archive/                              # v1 — frozen reference, byte-identical to current
-    ├── host-record.ps1                   #      Windows deploy. Do not modify; v2 lives
-    ├── host_recording_stream.py          #      next to it once written.
-    ├── v2cipher.py                       #      world-traffic V2 decryption (imported as
-    │                                     #      sibling module by host_recording_stream.py)
-    ├── forms_catalog.json                #      Delphi form VMT catalog (default --forms)
-    └── onclick_catalog.json              #      form watch-fields + click handlers
-                                          #      (default --catalog)
-
-replay/                                   # runs on this Mac
-├── recording_replayer.py                 # injects DLL into Wine client, drives form events,
-│                                         # gates net to coordinate with stub pair-matcher
-└── replay.sh                             # one-shot: tear down Wine → boot stub in PAIR_MATCH
-                                          # → launch Wine → run replayer → screenshot
-
-captures/
-├── phase3_walk_v4.jsonl                  # proven-good recording (decoded net + form events)
-└── phase3_walk_v4.pcap                   # raw all-VM TCP from the same session
+host-record-v2.ps1
+  ├── tshark #1 (raw all-VM TCP) ──► recording_<id>.pcap
+  └── python host_recording_stream_v2.py
+        ├── net-sniffer thread     (tshark #2 on game ports, V2-decoded)
+        └── input-recorder thread  (WH_MOUSE_LL + WH_KEYBOARD_LL,
+                                    foreground-filtered to vmconnect HWND)
+              │
+              ▼
+        JsonlWriter (mutex; seq + t_mono_ns + t_wall_ns at capture)
+              │
+              ▼
+        recording_<id>.jsonl
+        recording_<id>.manifest.json
 ```
 
-## What works today (cherry-picked from prior workdir)
+Reuse: `archive/recorder/notes/input-agent/host_agent.py` already
+implements the LL hook + foreground filter + fractional-coord JSONL
+emission. Lift it into the v2 input thread.
 
-`phase3_walk_v4.jsonl` plays back end-to-end via `replay/replay.sh`:
-master-server normal handler → SVC pair-matched (D3+D4+D7) → chat
-pair-matched (B0) → world cipher pair-matched (LLOGIN + spawn bundle +
-in-world frames). Final state: offline lands at Raito on the spawn hub
-with NPCs / players / chat / minimap rendered from recorded VM data.
+**No MemProcFS.** Form-poller is dropped, no memory deltas, so
+`hvmm.sys` is never loaded; BSOD root cause is structurally absent.
 
-`recorder/host_recording_stream.py` is the Windows-deployed version
-that produced this recording on Apr 29 — pulled directly from
-`C:\Users\RC\recorder\`, not from any drifted Mac copy.
+**Stealth surface:**
+- *Network* — `tshark` on host vEthernet, passive sniff (proven
+  invisible to live server in v1).
+- *Input* — host-side LL hooks observe events *before* they cross
+  VMBus into the guest. The guest OS / game client / live server
+  cannot enumerate or detect host-side hooks. Same architectural
+  mechanism EDR products use; not detectable to in-guest userland.
 
-External dependencies (referenced, not vendored):
+### Replay (Mac orchestrates, RC3 runs the game)
 
-- `~/proj/server-emulator-python3/` — docker-based stub server, used in
-  `pair_matcher` mode. `replay.sh` calls it by absolute path; will move
-  to a config when v2 lands.
-- `~/proj/new-solstice-client/` — Wine client distribution.
+```
+                              LAN
+   MAC (.148)                                       RC3 (.188, offline)
+   ──────────                                       ────────────────────
+   replayer.py                                      XenClient.exe
+     binds .148:1818/1819/                          (windowed @ 1440x900,
+            18123/18124        ◄────────────────── -i 192.168.12.148)
+     reads recording.jsonl       game protocol         │ same client binary
+     pair-match C2S → recorded S2C                     │ as recording
+     V2 encrypt for live K2                            │
+     synth input events  ────────────────────────► helper.ps1
+                            input cmd socket          listens .188:19999
+                                                      PostMessage(xen_hwnd,
+                                                        WM_LBUTTONDOWN, ...)
+                                                      (no cursor takeover)
+```
 
-## Known issues
+**Why RC3, not Wine on Mac:** keeps Mac input untouched. PostMessage
+delivers events to a specific HWND, so RC3's cursor doesn't move and
+no other RC3 app sees anything. XenClient receives clicks at recorded
+`(cx, cy)` regardless of where its window sits on the desktop.
 
-- **NPC modals don't open via the form-driver alone.** The injected
-  DLL drives Delphi forms but can't fire 3D-scene clicks (NPC clicks
-  go through DXRender's depth buffer, not Delphi). Fix: capture raw
-  user input (mouse + keyboard) at the host above the VM, replay via
-  `CGEvent` against the Wine client.
-- **`hvmm.sys` BSOD risk** when the v2 memory-delta thread polls live
-  guest RAM. Live introspection on the Lenovo T470 host crashes the
-  kernel under sustained read load (bugcheck `0x0a` IRQL_NOT_LESS_OR_EQUAL,
-  param1 = `0x1c18` — null deref inside the LeechCore Hyper-V driver).
-  v2 carries a `--bsod-safe` toggle that skips everything that loads
-  `hvmm.sys`; default is OFF (live mem on by default; toggle on if BSOD
-  recurs).
+**Resolution:** XenClient on RC3 windowed at 1440x900 (matching the
+recording VM). Recorded coords map 1:1, no scaling math. RC3's
+1920x1080 panel has room to spare.
 
-## v2 direction
+**Helper on RC3** — single PowerShell file, ~80 lines:
+- `[System.Net.Sockets.TcpListener]` on `.188:19999`
+- `Add-Type` P/Invoke for `user32.dll` (`FindWindow`, `PostMessage`)
+- Newline-delimited JSON commands → `PostMessage` calls
+- `SendInput` fallback if any DirectInput path surfaces (user reports
+  no camera-drag in their typical sessions, so unlikely needed)
 
-`recorder/` evolves toward v2:
+**Channels:**
 
-- Drop form-poller. Input replay supersedes form-driving for replay;
-  memory deltas supersede form events for RE annotation.
-- Add `input-recorder` thread: `WH_MOUSE_LL` + `WH_KEYBOARD_LL` global
-  hooks on the host, foreground-filtered to VMConnect, emit
-  `kind:"input_*"` events into the unified JSONL. Always on; not
-  gated by `--bsod-safe`.
-- Add memory-baseline + per-tick page-delta pipeline (`baseline.zst` +
-  `mem.delta.zst`). Gated by `--bsod-safe`: when the flag is set the
-  whole memory pipeline is skipped (strict; no `Save-VM` fallback in v2).
-- Unify the clock: every JSONL event carries `seq` allocated under the
-  `JsonlWriter` mutex at the moment of capture, plus `t_mono_ns` (QPC)
-  and `t_wall_ns`. Total ordering across threads is guaranteed by the
-  `seq` allocation.
+| Channel | Direction | Transport |
+|---|---|---|
+| Game protocol | RC3 → Mac | TCP on game ports (Mac binds, RC3 connects) |
+| Input commands | Mac → RC3 | TCP socket `.188:19999` |
+| Orchestration | Mac → RC3 | SSH (`xen_win_ed25519`); one-time SCP for helper |
 
-`replay/` follows once the v2 JSONL schema stabilises: replace the
-form-driver's "drive form events" step with "synthesize input from
-recorded `kind:"input_*"` events at calibrated VMConnect → Wine-window
-coordinates."
+### Output bundle (3 files per session)
 
-## Threat model (recording side)
+```
+recording_<id>.pcap          # raw all-VM TCP, safety net
+recording_<id>.jsonl         # net + input events on unified timeline
+recording_<id>.manifest.json # client SHA, vm_res, schema, start/exit
+```
 
-- Recording is **passive**: no transmission, no guest interaction.
-  The live server cannot detect the recorder; the in-guest game client
-  cannot detect the recorder.
-- DLL injection **only happens at replay time**, against the offline
-  Wine client. Never against the live VM.
-- The server-detection / ban-risk surface lives entirely in *replay-
-  against-real-server* scenarios, which this repo does not perform.
-  Replay here goes against the in-tree stub server only.
+### JSONL event kinds
+
+Universal fields on every event: `kind`, `seq`, `t_mono_ns`, `t_wall_ns`.
+`seq` is allocated under the `JsonlWriter` mutex at the moment of
+capture → total ordering across threads.
+
+| `kind` | Source | Notes |
+|---|---|---|
+| `session_start` / `session_stop` | recorder lifecycle | manifest fields included |
+| `viewport` | session start + on resize | `(client_w, client_h, vm_res, vmconnect_hwnd, dpi)` |
+| `net` | net-sniffer | port, dir (`c2s`/`s2c`), opcode, subop, `payload_hex`, `decrypted` |
+| `server_endpoint` | first-IP-seen detection | `(ip, port)` |
+| `input_mouse_move` | LL mouse hook (downsampled ~60 Hz) | `(cx, cy, cw, ch)` |
+| `input_mouse_button` | LL mouse hook | `button`, `event` (`down`/`up`), `cx,cy,cw,ch`, `mods[]` |
+| `input_mouse_wheel` | LL mouse hook | `delta` |
+| `input_key` | LL keyboard hook | `event`, `vk`, `vk_name`, `scan`, `mods[]`, `repeat` |
+| `input_focus` | window event | `focused:bool` — replay pauses synth on `false` |
+
+### Build phases
+
+**Phase A — replayer on Mac, consumes existing v1 JSONL.**
+
+- Read `~/proj/server-emulator-python3/` pair-matcher → port matching
+  algorithm into `replay/replayer.py`
+- Add V2 cipher encrypt direction to `archive/recorder/v2cipher.py`
+  (lift to `replay/v2cipher.py`)
+- TCP listeners on game ports
+- **Win condition:** `archive/captures/phase3_walk_v4.jsonl` replays
+  end-to-end through new replayer + XenClient on RC3 + `helper.ps1`.
+  No docker, no DLL injection.
+
+**Phase B — recorder v2 produces v2 JSONL shape.**
+
+- Build `recorder/host_recording_stream_v2.py`:
+  - net-sniffer (lift from v1, no concept changes)
+  - input-recorder (lift from `archive/recorder/notes/input-agent/host_agent.py`,
+    integrate into JsonlWriter)
+  - Drop form-poller entirely
+- New launcher `recorder/host-record-v2.ps1`
+- Manifest emission at session start
+- **Win condition:** a fresh v2 recording plays back through Phase A.
+
+### What got dropped from earlier iterations
+
+| Dropped | Why |
+|---|---|
+| Form-poller | Input replay drives form interactions naturally |
+| Memory baseline + deltas (`baseline.zst`, `mem.delta.zst`) | Replay reconstructs memory state by feeding same client user inputs and same network packets; ad-hoc MemProcFS attach to replay's XenClient covers RE inspection on demand |
+| `--bsod-safe` toggle | No `hvmm.sys` ever loads in v2 recorder, so the bug surface is gone |
+| MemProcFS dependency in recorder | None of the v2 threads need `M:\` |
+| All-forms full-instance recorder | Corollary of dropping form-poller |
+| Filesystem capture | Out of scope, offline game client captures this |
+| Audio | Out of scope, offline game client captures this |
+| Wine-on-Mac for replay | RC3 runs real Windows; no Mac takeover |
+| DLL injection during replay | PostMessage to HWND avoids it |
+| Sync beacon for pcap↔JSONL alignment | Both QPC-aligned via Npcap + Python `time.monotonic_ns`; adequate to ~µs |
+
+### Decisions locked in
+
+- Read-first for archived V1 `host_agent.py` (recorder side) and the docker
+  stub's pair-matcher (replayer side)
+- Pin XenClient window to 1440x900 on RC3 (1:1 coord mapping)
+- No camera-drag input — PostMessage path is sufficient
+- PowerShell helper on RC3 (no compilation, easy iteration,
+  scp-deployable as a single file)
+- Single TCP socket for input commands (`.188:19999`); persistent
+  connection, JSON lines
