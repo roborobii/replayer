@@ -157,4 +157,5 @@ pull-sessions:
 	@test -n "$(RECORDING_ID)" || (echo "[pull-sessions] usage: make pull-sessions RECORDING_ID=<id>"; exit 1)
 	$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).jsonl' $(SESSIONS)/
 	-$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).manifest.json' $(SESSIONS)/
+	-$(SCP) '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID).pcap' $(SESSIONS)/
 	@echo "[pull-sessions] OK: $(RECORDING_ID) -> $(SESSIONS)/"
