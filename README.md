@@ -110,29 +110,32 @@ ordering across threads.
 | `input_key` | LL keyboard hook | `event, vk, vk_name, scan, mods, repeat` |
 | `input_focus` | window event | `focused:bool` — replay pauses synth on `false` |
 
-## Build phases (parallelizable)
+## Build order (sequential)
 
-**Phase A — replayer on RC3, consumes existing v1 JSONL.**
-
-- Port pair-matcher from `~/proj/server-emulator-python3/`
-- Add V2 cipher encrypt direction (lift from `archive/recorder/v2cipher.py`)
-- `asyncio` TCP listeners on `127.0.0.1:1818/1819/18123/18124`
-- `ctypes` for `FindWindow` + `PostMessage` (in-process, no helper)
-- Mac-side `replay.sh` does SCP + SSH-launch + cleanup
-- **Win:** `archive/captures/phase3_walk_v4.jsonl` replays end-to-end on RC3.
-
-**Phase B — recorder v2 produces v2 JSONL.**
+**Phase 1 — Recording on NVIDIA HOST.**
 
 - `recorder/host_recording_stream_v2.py`:
   - net-sniffer (lift from v1 conceptually)
   - input-recorder (lift `archive/input-agent/host_agent.py` into JsonlWriter)
-  - drop form-poller
+  - drop form-poller entirely
 - New launcher `recorder/host-record-v2.ps1`
 - Manifest emission at session start
-- **Win:** fresh v2 recording plays back through Phase A.
+- **Win:** a clean session run produces `recording_<id>.{pcap,jsonl,manifest.json}`. JSONL has `kind:"net"` and `kind:"input_*"` events on a single `seq`-ordered timeline.
 
-Phase A and B are independent — share only the JSONL schema as their
-contract. Build via parallel Opus subagents.
+**Mac handoff (between phases).** Mac SCPs the bundle from NVIDIA HOST after recording stops, stores it locally, then SCPs to RC3 before the next replay session.
+
+**Phase 2 — Replay on Offline RC3.**
+
+- `replay/replayer.py`:
+  - Port pair-matcher from `~/proj/server-emulator-python3/`
+  - Add V2 cipher encrypt direction (lift from `archive/recorder/v2cipher.py`)
+  - `asyncio` TCP listeners on `127.0.0.1:1818/1819/18123/18124`
+  - `ctypes` for `FindWindow` + `PostMessage` (in-process, no helper)
+- Mac-side `replay.sh` does SCP + SSH-launch + cleanup
+- **Win:** the v2 recording from Phase 1 replays end-to-end on RC3 driving its own XenClient.
+
+Sequential because Phase 2's test surface is Phase 1's output —
+v1 captures rely on form events that v2 doesn't drive.
 
 ## What got dropped
 
@@ -148,6 +151,6 @@ contract. Build via parallel Opus subagents.
 
 ## Tomorrow's first actions
 
-1. Read `~/proj/server-emulator-python3/` pair-matcher
-2. Confirm Phase A test surface (`archive/captures/phase3_walk_v4.jsonl`)
-3. Spin Phase A + B agents in parallel with this README as their contract
+1. Build Phase 1: `recorder/host_recording_stream_v2.py` + `host-record-v2.ps1`
+2. Capture a fresh v2 session against the live game; verify JSONL shape
+3. Build Phase 2: `replay/replayer.py` against that fresh capture
