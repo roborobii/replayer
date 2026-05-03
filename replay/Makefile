@@ -47,7 +47,7 @@ JSONL     := $(SESSIONS)/recording_$(RECORDING_ID).jsonl
 
 .PHONY: help server server-bg server-stop status rc3-up deploy fullscreen \
         run kill input input-stop replay clean-tasks list-sessions pull-sessions \
-        install-cv2 cv-calibrate
+        install-cv2 cv-calibrate neutralize
 
 help:
 	@echo "Phase 2 targets:"
@@ -137,8 +137,17 @@ cv-debug-clean:
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Remove-Item -Recurse -Force $(REPLAY_REMOTE)/cv_debug -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Path $(REPLAY_REMOTE)/cv_debug | Out-Null"'
 
 kill: server-stop
-	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName xen-replay-input -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-replay-input -Confirm:$$false -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-launch -Confirm:$$false -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName xen-resize -Confirm:$$false -ErrorAction SilentlyContinue; Get-Process XenClient,DXRender,GLRender -ErrorAction SilentlyContinue | Stop-Process -Force; Get-CimInstance Win32_Process -Filter \"Name = '"'"'python.exe'"'"' OR Name = '"'"'pythonw.exe'"'"'\" | Where-Object { $$_.CommandLine -match '"'"'input_replayer'"'"' } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }; exit 0"'
-	@echo "[kill] RC3 client + input_replayer + scheduled tasks + Mac v2_server stopped"
+	$(SCP) kill_replayer.ps1 $(RC3):replay/ 2>/dev/null || true
+	@$(SSH) $(RC3) 'powershell -NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/kill_replayer.ps1'
+	@$(MAKE) --no-print-directory neutralize
+	@echo "[kill] RC3 client + input_replayer + scheduled tasks + Mac v2_server stopped + input neutralized"
+
+# Release any modifier keys / mouse buttons stuck on RC3 from a halted
+# replay or interrupted Alt-shortcut/drag. Schedules a one-shot
+# interactive task so SendInput delivers to the user's session.
+neutralize:
+	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$action = New-ScheduledTaskAction -Execute $(PYTHON_REMOTE) -Argument \"$(REPLAY_REMOTE)\\input_replayer.py --neutralize-only\" -WorkingDirectory $(REPLAY_REMOTE); $$principal = New-ScheduledTaskPrincipal -UserId RC3 -RunLevel Highest -LogonType Interactive; $$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -Hidden; $$task = New-ScheduledTask -Action $$action -Principal $$principal -Settings $$settings; Register-ScheduledTask -TaskName xen-neutralize -InputObject $$task -Force | Out-Null; Start-ScheduledTask -TaskName xen-neutralize; Start-Sleep -Milliseconds 600; Unregister-ScheduledTask -TaskName xen-neutralize -Confirm:$$false -ErrorAction SilentlyContinue | Out-Null"'
+	@echo "[neutralize] RC3 modifiers + mouse buttons released"
 
 # Force the game window to exactly 1440x900 client area at (0,0) so the
 # replay frame matches the recording's vmconnect 1440x900 game area.

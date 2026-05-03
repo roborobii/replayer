@@ -67,6 +67,53 @@ KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 KEYEVENTF_EXTENDEDKEY = 0x0001
 
+# Map pynput key.name strings (recorder's payload) -> Windows VK codes.
+# Recorder leaves vk=None for special keys, only setting vk for character
+# keys; without this table f1/alt/etc. would silently no-op. Both lower-
+# and Key.-prefixed forms are handled at lookup time.
+NAME_TO_VK = {
+    # function keys
+    **{f"f{i}": 0x6F + i for i in range(1, 13)},  # f1=0x70 ... f12=0x7B
+    # modifiers (left/right variants + generic)
+    "alt": 0x12, "alt_l": 0xA4, "alt_r": 0xA5, "alt_gr": 0xA5,
+    "ctrl": 0x11, "ctrl_l": 0xA2, "ctrl_r": 0xA3,
+    "shift": 0x10, "shift_l": 0xA0, "shift_r": 0xA1,
+    "cmd": 0x5B, "cmd_l": 0x5B, "cmd_r": 0x5C,  # left/right Win key
+    # editing / navigation
+    "backspace": 0x08, "tab": 0x09, "enter": 0x0D, "esc": 0x1B,
+    "space": 0x20, "delete": 0x2E, "insert": 0x2D,
+    "home": 0x24, "end": 0x23, "page_up": 0x21, "page_down": 0x22,
+    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+    # locks / misc
+    "caps_lock": 0x14, "num_lock": 0x90, "scroll_lock": 0x91,
+    "print_screen": 0x2C, "pause": 0x13,
+}
+
+
+def _resolve_vk(ev: dict) -> int:
+    """Resolve a Windows VK code from a recorded input_key event.
+    Prefers ev['vk'] (set for character keys), falls back to mapping
+    ev['name'] via NAME_TO_VK, then uses VkKeyScanW on ev['char'] as a
+    last resort. Returns 0 if unresolvable."""
+    vk = ev.get("vk")
+    if isinstance(vk, int) and vk > 0:
+        return vk
+    name = ev.get("name")
+    if name:
+        n = str(name).lower()
+        if n.startswith("key."):
+            n = n[4:]
+        if n in NAME_TO_VK:
+            return NAME_TO_VK[n]
+    ch = ev.get("char")
+    if isinstance(ch, str) and len(ch) == 1:
+        # VkKeyScanW: low byte = VK, high byte = shift state. We only
+        # need the VK; modifiers in the recording are separate events.
+        rv = user32.VkKeyScanW(ord(ch))
+        if rv != -1:
+            return rv & 0xFF
+    return 0
+
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
@@ -134,6 +181,8 @@ user32.IsIconic.argtypes = [wt.HWND]
 user32.IsIconic.restype = wt.BOOL
 user32.GetDoubleClickTime.argtypes = []
 user32.GetDoubleClickTime.restype = wt.UINT
+user32.VkKeyScanW.argtypes = [ctypes.c_wchar]
+user32.VkKeyScanW.restype = ctypes.c_short
 
 # GDI for window-screenshot (CV template match).
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -405,10 +454,44 @@ def send_mouse(flags: int, abs_x: int = 0, abs_y: int = 0, mouse_data: int = 0):
         print(f"[warn] SendInput(mouse) returned {n} err={err}", file=sys.stderr)
 
 
+# VKs that require KEYEVENTF_EXTENDEDKEY for the OS to interpret them
+# correctly (arrow keys, nav cluster, right-side modifiers, numpad div).
+_EXTENDED_VKS = frozenset({
+    0x21, 0x22, 0x23, 0x24,  # PgUp PgDn End Home
+    0x25, 0x26, 0x27, 0x28,  # arrows
+    0x2D, 0x2E,              # Insert Delete
+    0x90,                    # NumLock
+    0xA3, 0xA5,              # right Ctrl, right Alt
+    0x6F,                    # numpad /
+    0x0D,                    # numpad Enter (and regular Enter is fine without)
+})
+
+
+def neutralize_input():
+    """Release any modifier keys and mouse buttons that may be stuck
+    held from a previous run, manual typing on the host, or an
+    interrupted drag/Alt-shortcut. SendInput KEY_UP / MOUSE_UP for
+    not-currently-held keys is a no-op, so this is safe to call
+    unconditionally before each replay session.
+    """
+    # Modifier keys (generic + left/right variants + Win keys).
+    for vk in (0x10, 0xA0, 0xA1,  # Shift / LShift / RShift
+               0x11, 0xA2, 0xA3,  # Ctrl / LCtrl / RCtrl
+               0x12, 0xA4, 0xA5,  # Alt / LAlt / RAlt
+               0x5B, 0x5C):       # LWin / RWin
+        send_key(vk, up=True)
+    # All mouse buttons.
+    send_mouse(MOUSEEVENTF_LEFTUP)
+    send_mouse(MOUSEEVENTF_RIGHTUP)
+    send_mouse(MOUSEEVENTF_MIDDLEUP)
+
+
 def send_key(vk: int, up: bool):
     inp = INPUT()
     inp.type = INPUT_KEYBOARD
     flags = KEYEVENTF_KEYUP if up else 0
+    if vk in _EXTENDED_VKS:
+        flags |= KEYEVENTF_EXTENDEDKEY
     inp.ki = KEYBDINPUT(vk, 0, flags, 0, None)
     n = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
     if n != 1:
@@ -634,6 +717,11 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
     vs = get_virtual_screen()
     print(f"[replay] window client_rect screen=({win_x},{win_y}) size=({win_w}x{win_h})",
           file=sys.stderr)
+    # Release any modifier keys / mouse buttons stuck from a prior run
+    # or manual host typing before injecting recorded events.
+    neutralize_input()
+    print("[replay] input neutralized (modifiers + mouse buttons released)",
+          file=sys.stderr)
     if win_w <= 0 or win_h <= 0:
         print(f"[replay] HALT: window client_rect is degenerate ({win_w}x{win_h}); "
               f"hwnd=0x{hwnd:X} likely hidden/minimized/destroyed", file=sys.stderr)
@@ -753,6 +841,12 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
     # the auto-fallback when a match scores below threshold: click at
     # recorded coord plus median(history). Self-calibrating, no halts.
     shift_history: List[Tuple[int, int]] = []
+    # Last 'down' recorded client coord per button. Used on the matching
+    # 'up' to distinguish a click (down ~= up) from a drag (down != up).
+    # Drag releases use the up's own coord + learned shift so the drop
+    # lands on the correct UI element instead of teleporting back to the
+    # down position.
+    last_down_rec_xy_by_btn: Dict[str, Tuple[int, int]] = {}
     # Last 'down' wall timestamp + client coords per button. If a second
     # 'down' arrives at the same coords within Windows' double-click time,
     # also post WM_*BUTTONDBLCLK to the HWND — SendInput alone doesn't
@@ -858,16 +952,46 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
             # the live window and use the match center for the click target.
             cv_client_xy = None  # (cx, cy) in client px, or None
             cv_patch_name = ev.get("cv_patch")
-            # 'up' events have no patch; reuse the down event's CV-adjusted
-            # position so the click registers at a single pixel.
+            btn = ev.get("btn")
+            # 'up' events have no patch. Two cases:
+            #   click — up's recorded coord ~= down's: reuse down's CV
+            #     pixel so the click registers at a single pixel.
+            #   drag — up's recorded coord differs from down's: this is
+            #     a release at a NEW location. Use up's own recorded
+            #     coord plus the learned median shift so the drop lands
+            #     on the correct live-frame UI element instead of
+            #     teleporting back to the drag origin.
             if ev.get("state") == "up":
-                cv_client_xy = last_cv_xy_by_btn.get(ev.get("btn"))
+                up_rec_cx, up_rec_cy = map_client(
+                    ev["fx"], ev["fy"], ev["cw"], ev["ch"],
+                    vm_w, vm_h, win_w, win_h, top_offset, left_offset)
+                down_rec_xy = last_down_rec_xy_by_btn.get(btn)
+                is_drag = (down_rec_xy is not None
+                           and (abs(up_rec_cx - down_rec_xy[0]) > 4
+                                or abs(up_rec_cy - down_rec_xy[1]) > 4))
+                if is_drag:
+                    if shift_history:
+                        dxs = sorted(s[0] for s in shift_history)
+                        dys = sorted(s[1] for s in shift_history)
+                        mdx = dxs[len(dxs) // 2]
+                        mdy = dys[len(dys) // 2]
+                    else:
+                        mdx = mdy = 0
+                    cv_client_xy = (up_rec_cx + mdx, up_rec_cy + mdy)
+                    print(f"[drag-up] seq={ev.get('seq')} btn={btn} "
+                          f"down=({down_rec_xy[0]},{down_rec_xy[1]}) -> "
+                          f"up=({up_rec_cx},{up_rec_cy})+shift({mdx},{mdy}) "
+                          f"= drop=({cv_client_xy[0]},{cv_client_xy[1]})",
+                          file=sys.stderr)
+                else:
+                    cv_client_xy = last_cv_xy_by_btn.get(btn)
             if patches_dir and cv_patch_name and ev.get("state") == "down":
                 patch_path = os.path.join(patches_dir, cv_patch_name)
                 if os.path.isfile(patch_path):
                     rec_cx, rec_cy = map_client(
                         ev["fx"], ev["fy"], ev["cw"], ev["ch"],
                         vm_w, vm_h, win_w, win_h, top_offset, left_offset)
+                    last_down_rec_xy_by_btn[btn] = (rec_cx, rec_cy)
                     ok, score, mcx, mcy = cv_match_patch(hwnd, patch_path, rec_cx, rec_cy)
                     dx = mcx - rec_cx
                     dy = mcy - rec_cy
@@ -1017,10 +1141,16 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
                 send_mouse(MOUSEEVENTF_HWHEEL | MOUSEEVENTF_ABSOLUTE, ax, ay,
                            mouse_data=dx * 120)
         elif kind == "input_key":
-            vk = int(ev.get("vk", 0))
+            vk = _resolve_vk(ev)
             if vk <= 0:
+                print(f"[key] skip seq={ev.get('seq')} unresolved "
+                      f"name={ev.get('name')!r} vk={ev.get('vk')!r} "
+                      f"char={ev.get('char')!r}", file=sys.stderr)
                 continue
-            send_key(vk, up=(ev.get("state") == "up"))
+            up = (ev.get("state") == "up")
+            print(f"[key] seq={ev.get('seq')} {ev.get('name') or ev.get('char')} "
+                  f"vk=0x{vk:02X} {'up' if up else 'down'}", file=sys.stderr)
+            send_key(vk, up=up)
 
     print("[replay] done", file=sys.stderr)
 
@@ -1030,7 +1160,13 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Phase 2 input replayer (RC3 side)")
-    ap.add_argument("recording", help="path to recording_<id>.jsonl")
+    ap.add_argument("recording", nargs="?", default=None,
+                    help="path to recording_<id>.jsonl (omit when "
+                         "--neutralize-only is set)")
+    ap.add_argument("--neutralize-only", action="store_true",
+                    help="release any held modifier keys + mouse buttons "
+                         "and exit. Use to clean up after an interrupted "
+                         "replay or before manual play on this machine.")
     ap.add_argument("--window-title", default="XenClient")
     ap.add_argument("--start-from", choices=["gate_opened", "first_input"],
                     default="gate_opened")
@@ -1071,7 +1207,13 @@ def main() -> int:
     global CV_DEBUG_DIR
     CV_DEBUG_DIR = args.cv_debug_dir
 
-    if not os.path.isfile(args.recording):
+    if args.neutralize_only:
+        neutralize_input()
+        print("[neutralize] modifiers + mouse buttons released",
+              file=sys.stderr)
+        return 0
+
+    if args.recording is None or not os.path.isfile(args.recording):
         print(f"recording not found: {args.recording}", file=sys.stderr)
         return 2
 
