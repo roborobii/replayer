@@ -132,6 +132,8 @@ user32.IsWindowVisible.argtypes = [wt.HWND]
 user32.IsWindowVisible.restype = wt.BOOL
 user32.IsIconic.argtypes = [wt.HWND]
 user32.IsIconic.restype = wt.BOOL
+user32.GetDoubleClickTime.argtypes = []
+user32.GetDoubleClickTime.restype = wt.UINT
 
 # GDI for window-screenshot (CV template match).
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -413,14 +415,25 @@ def send_key(vk: int, up: bool):
 WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
+WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONDOWN = 0x0204
 WM_RBUTTONUP = 0x0205
+WM_RBUTTONDBLCLK = 0x0206
 WM_MBUTTONDOWN = 0x0207
 WM_MBUTTONUP = 0x0208
+WM_MBUTTONDBLCLK = 0x0209
+
+_DBLCLK_MSG = {
+    "L": WM_LBUTTONDBLCLK,
+    "R": WM_RBUTTONDBLCLK,
+    "M": WM_MBUTTONDBLCLK,
+}
 
 MK_LBUTTON = 0x0001
 MK_RBUTTON = 0x0002
 MK_MBUTTON = 0x0010
+
+_BTN_MK_BY_BTN = {"L": MK_LBUTTON, "R": MK_RBUTTON, "M": MK_MBUTTON}
 
 _PM_BTN_MSGS = {
     ("L", "down"): (WM_LBUTTONDOWN, MK_LBUTTON),
@@ -726,6 +739,14 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
     # so the matching 'up' event clicks at the same screen position. Many
     # UIs require down/up at the same pixel for the click to register.
     last_cv_xy_by_btn: Dict[str, Tuple[int, int]] = {}
+    # Last 'down' wall timestamp + client coords per button. If a second
+    # 'down' arrives at the same coords within Windows' double-click time,
+    # also post WM_*BUTTONDBLCLK to the HWND — SendInput alone doesn't
+    # always generate the message games rely on for double-click handling.
+    last_down_ns_by_btn: Dict[str, int] = {}
+    last_down_xy_by_btn: Dict[str, Tuple[int, int]] = {}
+    dblclk_ms = int(user32.GetDoubleClickTime()) or 500
+    dblclk_ns = dblclk_ms * 1_000_000
 
     for ev in timeline:
         if stop_flag[0]:
@@ -919,6 +940,41 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
                       f"fx={ev['fx']:.4f} fy={ev['fy']:.4f} -> screen=({sx},{sy})",
                       file=sys.stderr)
                 send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | flag, ax, ay)
+                # Double-click bridge: if this is the second L/R/M down at
+                # the same client coords within Windows' double-click time,
+                # also post WM_*BUTTONDBLCLK to the HWND. SendInput alone
+                # doesn't reliably synthesize this for games that watch
+                # for it explicitly (e.g., character-select "enter world").
+                btn = ev.get("btn")
+                state = ev.get("state")
+                if state == "down" and btn in _DBLCLK_MSG:
+                    # client-coord click point for posting (px in window).
+                    if cv_client_xy is not None:
+                        ccx, ccy = cv_client_xy
+                    else:
+                        ccx, ccy = sx - win_x, sy - win_y
+                    now_ns = ev.get("t_wall_ns") or time.monotonic_ns()
+                    last_ns = last_down_ns_by_btn.get(btn, 0)
+                    last_xy = last_down_xy_by_btn.get(btn)
+                    is_dbl = (
+                        last_xy is not None
+                        and abs(ccx - last_xy[0]) <= 4
+                        and abs(ccy - last_xy[1]) <= 4
+                        and 0 < (now_ns - last_ns) <= dblclk_ns
+                    )
+                    if is_dbl:
+                        lparam = ((ccy & 0xFFFF) << 16) | (ccx & 0xFFFF)
+                        _post_message(hwnd, _DBLCLK_MSG[btn],
+                                      _BTN_MK_BY_BTN[btn], lparam)
+                        print(f"[dblclk] seq={ev.get('seq')} {btn} "
+                              f"posted WM_BUTTONDBLCLK at client=({ccx},{ccy})",
+                              file=sys.stderr)
+                        # Reset so a third click doesn't re-trigger.
+                        last_down_ns_by_btn.pop(btn, None)
+                        last_down_xy_by_btn.pop(btn, None)
+                    else:
+                        last_down_ns_by_btn[btn] = now_ns
+                        last_down_xy_by_btn[btn] = (ccx, ccy)
         elif kind == "input_mouse_wheel":
             sx, sy = map_coords(ev.get("fx", 0.5), ev.get("fy", 0.5),
                                 ev.get("cw", vm_w), ev.get("ch", vm_h),
