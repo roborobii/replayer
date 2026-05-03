@@ -1,6 +1,3 @@
-# Recordings contain login/session tokens — keep out of source control.
-sessions/
-
 # Python bytecode caches.
 __pycache__/
 *.pyc
