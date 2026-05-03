@@ -1,0 +1,16 @@
+# Recordings contain login/session tokens — keep out of source control.
+sessions/
+
+# Python bytecode caches.
+__pycache__/
+*.pyc
+*.pyo
+
+# Vendor binaries (downloaded + verified separately).
+replay/_vendor/
+
+# Runtime/log artifacts deposited on RC3 or locally.
+**/input_replayer.log
+**/resize.log
+**/windows_dump.txt
+/tmp/v2_server.log
