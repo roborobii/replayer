@@ -164,8 +164,10 @@ pull-sessions:
 	-$(SCP) -r '$(RC):$(RC_SESSIONS)/recording_$(RECORDING_ID)_patches' $(SESSIONS)/
 	@echo "[pull-sessions] OK: $(RECORDING_ID) -> $(SESSIONS)/"
 
-# RC3 has no internet. Download Windows cp311 wheels on Mac, scp them
-# to RC3, then run offline pip install. Idempotent — safe to re-run.
+# RC3 has no internet AND ships the embeddable Python distro (no pip,
+# no ensurepip). Download Windows cp311 wheels (incl. pip itself) on
+# Mac, scp them to RC3, then run pip directly from its wheel zipapp
+# to install everything offline. Idempotent — safe to re-run.
 CV2_WHEEL_DIR := _vendor/cv2-wheels
 install-cv2:
 	@mkdir -p $(CV2_WHEEL_DIR)
@@ -178,11 +180,12 @@ install-cv2:
 		--only-binary=:all: \
 		--dest $(CV2_WHEEL_DIR) \
 		opencv-python-headless numpy Pillow pywin32
+	@$(PYTHON) -m pip download --dest $(CV2_WHEEL_DIR) pip setuptools
 	@echo "[install-cv2] scp -> RC3:replay/_wheels/"
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path $(REPLAY_REMOTE)/_wheels | Out-Null"'
-	$(SCP) -r $(CV2_WHEEL_DIR)/*.whl $(RC3):replay/_wheels/
-	@echo "[install-cv2] pip install offline on RC3..."
-	@$(SSH) $(RC3) 'powershell -NoProfile -Command "& $(PYTHON_REMOTE) -m pip install --no-index --find-links=$(REPLAY_REMOTE)/_wheels opencv-python-headless numpy Pillow pywin32"'
+	$(SCP) $(CV2_WHEEL_DIR)/*.whl $(RC3):replay/_wheels/
+	@echo "[install-cv2] bootstrapping pip + installing wheels on RC3..."
+	@$(SSH) $(RC3) 'powershell -NoProfile -Command "$$pipwheel = (Get-ChildItem $(REPLAY_REMOTE)/_wheels/pip-*.whl | Select-Object -First 1).FullName; & $(PYTHON_REMOTE) $$pipwheel/pip install --no-index --find-links=$(REPLAY_REMOTE)/_wheels setuptools opencv-python-headless numpy Pillow pywin32"'
 	@echo "[install-cv2] verifying on RC3..."
-	@$(SSH) $(RC3) 'powershell -NoProfile -Command "& $(PYTHON_REMOTE) -c \"import cv2, numpy, PIL, win32gui; print(\\\"cv2\\\", cv2.__version__); print(\\\"numpy\\\", numpy.__version__); print(\\\"Pillow\\\", PIL.__version__)\""'
+	@$(SSH) $(RC3) "$(PYTHON_REMOTE) -c \"import cv2, numpy, PIL, win32gui; print('cv2', cv2.__version__); print('numpy', numpy.__version__); print('Pillow', PIL.__version__); print('pywin32 OK')\""
 	@echo "[install-cv2] OK"
