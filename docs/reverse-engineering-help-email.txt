@@ -1,0 +1,89 @@
+Reverse Engineering Help
+Sent
+
+Sent
+Message 1 of 3. For JAWS, turn virtual PC Cursor on if needed.
+
+Robin Cristobal
+To:  kian.bennett128@yahoo.co.uk
+ · 
+Thu, Apr 16, 2020 at 9:48 PM
+Message Body
+Hi Kian,
+
+We don't know each other but I'd like to ask you for some advice in reverse engineering game servers.
+I found your git repo on Secret of the Solstice server emulator, and I'd like to do something similar.
+
+I was wondering how you learned or got started with this; and hoping you could point me in the right direction.
+I'm really not sure where to start.
+
+Thanks in advance,
+Robin
+Message 2 of 3. For JAWS, turn virtual PC Cursor on if needed.
+
+Kian Bennett
+To:  me
+ · 
+Fri, Apr 17, 2020 at 9:11 AM
+Message Body
+Hi Robin,
+
+ 
+
+I’m no expert in servers or reverse engineering but I’m happy to go through how I got started. It was mostly trial and error and some good fortune with how Secret of the Solstice was made but some points may apply to your game.
+
+ 
+
+The first step was to direct the client’s connection to my server rather than an address that no longer existed. Luckily the game came with a separate launcher that was written with .NET so was simple to decompile. I found that it launched the client executable with an argument that gave an ip address - I set up a simple TCP server in C# and directed the client towards it.
+
+ 
+
+Once a connected was established between the client and my server it was a case of trial and error, seeing what packets send to the client would do what, and what packets the server received. I used IDA Pro to disassemble the client (the game was made with Borland Delphi and couldn’t be decompiled) to trace where the incoming packets were received and how they were handled. IDA produces pseudocode in C where you can rename symbols so after a while I got a good understanding of which bytes in a packet did what.
+
+ 
+
+A problem I did encounter was packet encryption, naturally packets were encrypted by the client before being sent out and decrypted after being received. This isn’t something I’m familiar with, so instead of trying to decipher the encryption in the assembly I simply NOP’d out the instructions that called the encryption/decryption subroutines, so packets were sent and received plainly. Obviously this wouldn’t be suitable for production but it did make things a lot easier to debug.
+
+ 
+
+There’s a great paper “Introduction to Server-side Emulation” here: https://drive.google.com/file/d/0B7iR3cG637AmZXFfS0FSNzBHd0E/view
+
+It outlines the tools to get started and how to structure your server.
+
+ 
+
+This is a good list of resources, however most server emulation stuff online is for games that already have active servers:
+
+https://github.com/dsasmblr/hacking-online-games/
+
+ 
+
+I hope this is of some help, if you have any more questions feel free to email me or add me on discord: Kian#5284
+
+ 
+
+Good luck!
+
+ 
+
+Kian
+
+ 
+
+ 
+
+
+Show trimmed content
+Message 3 of 3. For JAWS, turn virtual PC Cursor on if needed.
+
+Robin Cristobal
+To:  Kian
+ · 
+Fri, Apr 17, 2020 at 6:28 PM
+Message Body
+Thanks Kian!
+
+This helps give me some insight. I’ll take a look at the resources you gave me. And I'll add you on discord as well, so you can look out for Robin#1231
+
+Best,
+Robin

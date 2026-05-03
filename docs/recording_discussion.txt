@@ -1,0 +1,847 @@
+ When I do: powershell -ExecutionPolicy Bypass -File .\host-record.ps1 phase3_walk_v7 does it record everything in       memory? Or just certain UI menu events? I want to record gameplay such as an archer using a ranged skill on a monster 
+  Searched for 1 pattern, read 2 files (ctrl+o to expand)
+
+● Short answer: no, it doesn't snapshot all of memory — it records two specific streams, and gameplay shows up in one of   them.
+
+  What gets recorded into recording_<id>.jsonl:                                                                         
+  1. Form-poller (kind:"form") — host_recording_stream.py:249. Only watches Delphi UI form instances listed in            forms_catalog.json, and within those, only the field offsets registered in onclick_catalog.json::form_watcher_fields.
+  This is your "UI menu events" channel — login screen, char select, inventory open, etc. It will not see an archer
+  firing a skill unless that action mutates a watched offset on a watched form.
+  2. Net-sniffer (kind:"net") — host_recording_stream.py:406. Spawns tshark with BPF tcp and (port 1818 or 1819 or 18123
+   or 18124) (:67), reassembles V2 frames, and on world port 18123 decrypts via v2_cipher. This is where ranged skill /
+  monster combat lives — those are world-server packets (skill request C2S, damage/HP S2C). They're emitted as JSONL
+  with opcode + decrypted payload hex.
+  3. Raw pcap — host-record.ps1 also runs a separate tshark capturing all VM TCP (filter tcp, :53) into
+  recording_<id>.pcap, untouched by the JSONL parser. Full replay material if you ever need it.
+
+  So for "archer uses ranged skill on monster": yes, captured — but as decrypted world-port frames in the JSONL
+  kind:"net" stream (and raw bytes in the pcap), not as memory snapshots. If you want richer state (HP values, target
+  id, cooldown timers as they tick in the client), you'd need to extend form_watcher_fields to cover the relevant
+  in-game form/struct offsets.
+
+✻ Crunched for 28s
+
+> Is there something similar to Raw pcap? Where all network gets collected. I want all memory to be collected...        
+● Short answer: there's no pcap-equivalent for memory in this setup, and "stream all memory continuously" isn't really
+  practical — but there are a few options depending on what you actually need.
+
+  The asymmetry: pcap is cheap because network is a thin pipe (KB/s). Process memory for DXRender is typically hundreds   of MB to a few GB, and it changes constantly. A 1 Hz full dump = ~GB/s to disk; even 0.1 Hz fills your disk in minutes   and is unreadable after.                                                                                             
+  Realistic options, ordered by effort:
+
+  1. Periodic full snapshots via MemProcFS — copy M:\pid\<pid>\memory.vmem (or tar up vmemd\*.vvmem) every N seconds.
+  Simplest, but huge. Reasonable if N ≥ 30s and you only run short sessions.
+  2. Hyper-V checkpoints — Checkpoint-VM on a cadence. Captures full VM RAM + disk delta. Heavy but actually replayable.
+   Good for "I want to rewind a 5-minute combat session," not for continuous recording.
+  3. Watched-region dumps (recommended) — extend the form-poller approach: instead of reading registered offsets, dump
+  the entire instance (or a few specific heap regions like the player struct, target struct, skill table) every poll
+  tick. Diff against last snapshot, emit only changed bytes. This is the memory equivalent of "raw pcap of the things
+  that matter" and is what most game-state recorders actually do. Cost stays in MB, not GB.
+  4. Targeted struct logging — figure out where the combat state lives (player HP/MP/pos, target id, active skill id,
+  cooldowns) and add those offsets to form_watcher_fields (or a new sibling table). This is what the existing recorder
+  is built for; you just need the right offsets.
+
+  My recommendation: (3) or (4). Tell me which gameplay state you actually want to reconstruct from the recording (skill
+   id used? damage dealt? full party state? mob AI state?) and I can suggest where to point it. Dumping literally all
+  memory is almost never what people actually want once they see the size.
+
+✻ Cogitated for 19s
+
+> I don't actually know where they are in memory that's why i want raw since it'll be easier to decipher later          
+● That's a legitimate reverse-engineering workflow — snapshot now, find offsets later by diffing snapshots against
+  timestamped events. Here's what I'd actually build:
+
+  The plan: periodic heap snapshots, aligned to the JSONL timeline.                                                     
+  - Dump M:\pid\<pid>\vmemd\*.vvmem filtered the same way the form-scanner already filters (skip STACK, TEB, .dll, .exe,   and addrs ≥ 0x80000000). That's the heap — where game state lives. Skipping code/stack cuts size 5–10×.
+  - Every N seconds, tar+zstd the filtered set into recording_<id>_mem_<seq>_<t>.tar.zst. Zstd on heap memory typically
+  gets 5–20× because it's mostly zeros and repeating structures.
+  - Emit a {"kind":"mem_snapshot","seq":N,"t":...} line into the JSONL so memory snapshots line up with net frames and
+  form events on the same timeline.
+  - Trigger mode (better than fixed interval): snapshot on demand — e.g. you press F12 in-game, or the recorder
+  snapshots every time a world-port packet with a specific opcode flies by. Way smaller than continuous, and you get a
+  snapshot at exactly the moment of interest.
+
+  Realistic sizes for DXRender heap (rough): ~100–400 MB raw per snapshot, ~10–40 MB after zstd. At one snapshot every
+  5s for 10 minutes = ~1–5 GB. Workable. At 1 Hz it gets painful fast.
+
+  Two questions before I write it:
+
+  1. Cadence: fixed interval (and what — every 2s? 5s?), or trigger-based (e.g. snapshot 500ms before and 500ms after
+  every world-port packet)? Trigger-based is much smaller and lines up with combat events.
+  2. Scope: just DXRender's heap, or do you also want kernel/driver memory? Heap-only is what you want for game state;
+  full-VM is overkill and 10× larger.
+
+  If you want something quick right now, my default would be: DXRender heap, zstd, every 3 seconds, plus a
+  manual-trigger hotkey. Say the word and I'll add it as a third thread to host_recording_stream.py.
+
+✻ Worked for 19s
+
+> Could we do a base line then only record changes? Or does it all change                                               
+● Yes, this works well — and it's the right instinct. Most of a game process's heap is stable: loaded textures/meshes,
+  item DB, skill tables, string pools, loaded scripts. That's typically 60–80% of total heap and basically never changes   after load. The churn is concentrated in a much smaller working set.
+                                                                                                                          The technique: page-granular delta recording.
+                                                                                                                          1. Baseline at t=0: snapshot the full filtered heap once (~100–400 MB raw, ~20–50 MB zstd). Write it as
+  recording_<id>_baseline.bin.zst plus a manifest of {region_base, length, page_hashes[]} where each page is 4 KB and
+  the hash is xxhash64 (fast, ~10 GB/s).
+  2. Every tick: re-hash the same pages. For each page whose hash changed, record {t, addr, new_4kb_bytes}. Append to
+  recording_<id>_mem.delta.zst.
+  3. Replay: start from baseline, walk the delta log forward applying changed pages. You can reconstruct memory at any
+  timestamp.
+
+  What you'll see in practice:
+  - Static stuff (~60–80%): zero deltas. Free.
+  - Slow-churn (HP, position, inventory, target id, cooldowns) — this is what you actually want — a few pages per
+  second.
+  - Noise (allocator metadata, render command ring buffers, audio mixer, network rx buffers, animation interpolators):
+  constant churn, maybe 50–500 pages/sec. Annoying but compresses well and you can filter post-hoc by "pages that
+  changed only when an interesting event fired."
+
+  Rough budget for DXRender at 1 Hz delta: baseline ~30 MB, then ~0.5–5 MB/sec compressed. 10-minute combat session ~
+  300 MB–3 GB instead of 10–30 GB for naïve full snapshots. That's the difference between viable and not.
+
+  Bonus: the delta log is itself a goldmine for offset hunting. Sort pages by change frequency — the slow-churn ones are
+   almost always game state. The pages that change every single tick are usually noise.
+
+  One caveat: heap layout shifts. If a region gets unmapped/remapped (e.g. zone change allocates new chunks), the hash
+  table needs to handle "new region appeared" / "region gone" events. Easy to add — just re-enumerate vmemd files each
+  tick and emit region add/remove events alongside the page deltas.
+
+  Want me to implement this as a third thread in host_recording_stream.py? I'd suggest:
+  - 1 Hz tick rate (tunable)
+  - 4 KB pages, xxhash64
+  - baseline written once at thread start
+  - deltas appended as length-prefixed records to a single .delta.zst file
+  - mem_baseline / mem_delta / mem_region_change events into the main JSONL so it's all on one timeline
+
+✻ Sautéed for 26s
+
+> I want it built into the same .\host-record.ps1 script. I want to be able to replay it offline using the game client    (not a video) at a later point that's why we're doing this. We also want to reverse eng later on as well so that's      the reason. NOTE: Whatever we do here, we should make use of the readonly M:\ memprocfs so it is undetected from the    game client within the VM, we're reading the VM and the process outside and not directly the game client so the real    fan-made server is unaware and won't ban our accounts or IP                                                           
+● Before I write code, one important architectural thing to surface — because memory recording doesn't actually give you   client replay, and I want to make sure we build the right thing.
+
+  Stealth — confirmed safe                                                                                              
+  Everything we read goes through M:\ (MemProcFS over the live VM), which is read-only by construction: it's a virtual    filesystem layered on the hypervisor's view of guest RAM. No hooks in the guest, no DLL injection, no kernel driver,
+  no writes — the game client can't observe it. tshark on the host's vEthernet adapter is the same story: passive
+  sniffing of frames already on the wire, invisible to client and server. Your existing setup is already on the right
+  side of this line; adding memory snapshots doesn't change it.
+
+  The replay-through-client problem
+
+  "Replay through the game client (not a video)" is a much harder requirement than "record memory." Two very different
+  replay mechanisms:
+
+  A. Network replay (feasible, ~mostly already built):
+  - You already have raw pcap of all VM TCP + decrypted V2 frames in the JSONL
+  - Stand up a local stub server on 1818/1819/18123/18124 that pretends to be the real server
+  - For each C2S packet from the client, replay the recorded S2C response with original timing
+  - Client believes it's online. Real server never contacted → no ban risk.
+  - The hard part is that real sessions aren't deterministic: if the client picks a different RNG seed, your recorded
+  handshake won't match, login crypto will diverge. Solvable but nontrivial.
+
+  B. Memory replay (NOT what you want):
+  - Inject recorded memory state back into the running client
+  - Requires writing to guest memory → breaks your read-only stealth rule and your saved feedback (Guest VM memory
+  access must be read-only)
+  - Detectable; gets you banned.
+
+  So for client-replay, what you actually need is (A) — and memory recording doesn't help with replay at all. Memory
+  recording is purely for offline reverse-engineering: figure out which bytes correspond to HP, target id, skill
+  cooldowns, etc., so you can later interpret the network frames you're already capturing.
+
+  That's still very valuable! But it changes the framing: we're not recording memory to replay it — we're recording it
+  to decode the network capture later.
+
+  Proposed design (memory side)
+
+  Add a third thread to host_recording_stream.py (kept in the same host-record.ps1 flow), doing the page-delta scheme we
+   discussed:
+
+  - Baseline snapshot of DXRender heap regions (filter same as scan_vmt_instances: skip STACK/TEB/.dll/.exe, addr <
+  0x80000000) → recording_<id>.baseline.zst
+  - Per-tick xxhash64 of 4 KB pages, only dump changed pages → recording_<id>.mem.delta.zst (length-prefixed: <u64
+  t_ns><u32 addr><u32 page_len><bytes>)
+  - Region add/remove events when vmemd file set changes
+  - All three events (mem_baseline, mem_delta_chunk, mem_region_change) tagged into the main JSONL with timestamps so
+  memory aligns with net frames and form events on one timeline
+  - 1 Hz default, configurable via new -MemHz param on host-record.ps1
+  - Pure read-only (open(path, "rb") on M:\pid\<pid>\vmemd\*.vvmem — same call pattern already used)
+
+  Files added to session:
+  - recording_<id>.baseline.zst (~30 MB)
+  - recording_<id>.mem.delta.zst (~0.5–5 MB/sec, growing)
+
+  Two questions before I write it:
+
+  1. Confirm: are you OK with "memory recording is for offline RE only, replay-through-client will be a separate
+  network-replay project later"? Or were you specifically hoping memory recording would feed replay?
+  2. zstandard Python module — pip install zstandard? Or want me to use stdlib gzip (3–4× worse compression but zero
+  deps)?
+
+✻ Brewed for 4m 27s
+
+> Yes I have the network replay already, but it doesn't open NPC modals nor fight monsters which I believe has to be      started in game client only. The damage does go through server and npc does give you items from server so those would    be over network but e.g. opening npc modal, or hitting a monster , those initiations has to be done by client so       that's what I'm gonna try to replay -- let me know if it's wrong approach for this                                    
+● Your instinct is right about what needs client-side initiation, but I'd push back on how to drive it. Memory recording   won't help here.
+
+  The actual gap in your replay                                                                                         
+  You're correct: opening an NPC modal and swinging at a mob are client-initiated — the client sends a C2S packet ("I     clicked NPC #47", "use skill 12 on entity 9281 at pos X,Y") and then the server responds. Your stub server can replay
+  S2C all day, but if no C2S ever arrives, the conversation never starts.
+
+  So the missing piece isn't memory — it's input replay: mouse clicks and key presses at the right times against the
+  running client. That regenerates the C2S packets naturally, the stub server's recorded S2C answers fire in response,
+  and the client renders the modal/combat as if it were live.
+
+  Why memory replay is the wrong tool for this
+
+  To "replay memory" into the running client you'd have to write into guest RAM (or call into Delphi onclick handlers
+  via function pointer pokes). Both require a guest-side write path — kernel driver, DLL injection, or VMM-level write —
+   and all of them break the read-only stealth boundary you've carefully kept. Your saved rule (Guest VM memory access
+  must be read-only) exists for exactly this reason. Don't cross it.
+
+  Recommended architecture
+
+  Three independent record/replay channels, all stealth-safe because they live outside the guest:
+
+  1. Network (have): pcap + decrypted JSONL → stub server replays S2C.
+  2. Input (missing): record host-side mouse/keyboard events going into the VM viewer window → on replay, SendInput them
+   back at the recorded timestamps. This is what drives client-initiated C2S.
+  3. Memory (proposed today): page-delta snapshots → purely for offline RE so you can decode what those C2S/S2C bytes
+  mean and find game-state offsets.
+
+  So memory recording earns its keep, but as a decoding aid, not a replay mechanism.
+
+  One question that affects the input-record design
+
+  How are you connecting to the VM — Hyper-V VMConnect, RDP, or a remote viewer? That determines where to hook input on
+  the host:
+
+  - VMConnect: hook the vmconnect.exe window with SetWindowsHookEx (WH_MOUSE_LL / WH_KEYBOARD_LL filtered to that HWND).
+  - RDP (mstsc): same trick, but coordinates are window-relative to mstsc's client area.
+  - Headless / no viewer: harder; you'd need a host-side input injector that talks to the hypervisor.
+
+  If you tell me which one, I can fold an InputRecorder thread into host_recording_stream.py alongside the memory delta
+  thread — and host-record.ps1 will record all four streams (raw pcap, parsed net JSONL, form events, memory deltas,
+  plus input events) in one shot.
+
+  Then for replay you'd have everything you need: input drives the client, stub server answers, memory snapshots help
+  you understand what happened.
+
+  Sound right? If yes, tell me the VM viewer + answer the zstd-vs-gzip question from before, and I'll build it.
+
+✻ Cogitated for 56s
+
+> Yeah but user input has been hard to replay since it's inaccurate e.g. resolution diff. But I guess we can adjust to    fit the replay                                                                                                        
+● Resolution diff is the easy part — normalize to client-area percentages, multiply on replay. The real fragility is
+  world-state divergence (camera angle, char position, mob location) and timing/RNG. Even pixel-perfect replay falls
+  apart if the monster you clicked at t=43.2s isn't standing at the same screen position when you replay.
+                                                                                                                          But I think you may have a cleaner abstraction available than raw mouse pixels. Two ideas worth weighing before we
+  commit to input recording:                                                                                            
+  1. Record clicks at the form/widget level, not the pixel level
+
+  You already have onclick_catalog.json and the form-poller resolves live form addresses. For UI clicks (NPC modal
+  buttons, inventory, hotkey bar), record the semantic target: {form: "TDncNpcDialog", button_idx: 3} instead of {x:
+  847, y: 423}. On replay, resolve that form's current rect via the same MemProcFS path and synthesize the click at its
+  center. Resolution-, DPI-, and layout-independent.
+
+  The form-poller can already detect the click happened — you'd just need to also record which form/widget was the
+  target. That's a small extension to its current "field changed" logic.
+
+  2. Test whether you even need input replay for combat
+
+  Before building input capture, run an experiment: replay just the network stream against the running client without
+  synthesizing any input. In a server-authoritative MMO, the sequence for "I hit a monster" is usually:
+  1. Client click → C2S "use skill 12 on entity 9281"
+  2. Server validates → S2C "entity 1 cast skill 12 on 9281, dmg 47"
+  3. Client receives S2C and plays the animation locally because the server told it to
+
+  If your game is server-authoritative (most fan-revived servers are), step 3 fires purely from S2C — no input click
+  required. The real "input replay" reduces to "send the recorded C2S packet at the right time," which you can do by
+  injecting it into the client's outgoing socket or by just spoofing it from the stub-server side as if it had received
+  it.
+
+  If the client is more client-authoritative for some actions (UI modals especially), those are the cases where you
+  genuinely need input synthesis — and (1) handles them at the form level cleanly.
+
+  My suggested order
+
+  1. First: try network-only replay against the live client. See what actually doesn't fire. That's your ground-truth
+  list of "things that need input."
+  2. Second: for that list, capture at the form level using the existing catalog rather than pixel level. Extension to
+  the form-poller.
+  3. Third: for true world-space clicks (clicking a mob in the 3D scene) — only build pixel-level capture if (1) and (2)
+   don't cover it. And there, accept that perfect replay needs world-state determinism, which is its own rabbit hole.
+
+  Memory delta recording is independent of all this and still earns its keep for RE.
+
+  Want to do (1) first as a sanity check, or just go ahead and build the memory-delta thread now since that's
+  universally useful regardless of which input strategy wins? I'd lean build memory deltas now since that work isn't
+  blocked by the input question.
+
+✻ Crunched for 48s
+
+> are we able to just record every form? Why is it filtering? I think it makes sense to jusst record every form/widget.    Not sure if monster objects count as forms though                                                                    
+● Filtering is a manual curation choice, not a technical limit. form_watcher_fields in onclick_catalog.json is "forms
+  someone has reverse-engineered offsets for." Scanning every Delphi class is doable — it just means iterating every
+  entry in forms_catalog.json instead of only the ones with hand-picked field offsets.
+                                                                                                                          Two flavors of "record every form":
+                                                                                                                          A. Every form's existence + lifecycle (cheap): for each VMT in forms_catalog.json, scan the heap, emit form_appear /
+  form_destroy events with the full instance bytes (or first N bytes) at appearance time. You learn which UI screens
+  were open when, without needing to know offsets in advance.
+
+  B. Every form's full state, continuously (more expensive but the right thing for RE): same as (A) plus on each tick,
+  dump the full instance_size bytes of every live instance and delta-compress like the heap snapshot scheme. You can
+  later diff "before NPC modal opened" vs "after" and see which bytes flipped — that's how you'd find the offsets you
+  don't know yet.
+
+  I'd do (B). Cost is small because Delphi instances are typically 256 B – 4 KB each and there are maybe 50–200 live at
+  any time → a few hundred KB raw per tick, tiny after delta+zstd. And it's exactly the data shape that makes RE
+  tractable.
+
+  Monsters are not forms
+
+  Correct instinct. In a Delphi/DXRender game client:
+  - Forms / TDnc* widgets = UI: windows, panels, buttons, modals, hotkey bars, the chat box. These are what the
+  form-poller sees.
+  - Monsters, NPCs, players, projectiles, ground items = engine-side scene actors. Different class hierarchy (often
+  TActor, TCreature, T3DObject, or a custom TWorldEntity), usually owned by a world/scene manager singleton, not a form.
+   Same VMT-scan technique works to find them, but they won't show up in forms_catalog.json because that catalog was
+  built for UI.
+
+  So to capture monster state you'd want a parallel "entity catalog" — same machinery (heap-scan VMTs, dump instance
+  bytes, delta-compress), different list of class VMTs to look for. You may not have that catalog yet; building it is
+  its own RE step.
+
+  Practical proposal
+
+  Layered into one third thread, all going to the same JSONL/delta files:
+
+  1. Page-delta heap snapshots — universal safety net, catches everything regardless of class. (Today's plan.)
+  2. All-forms full-instance recorder — iterate every entry in forms_catalog.json, dump full instance bytes,
+  delta-compress per-instance. Resolution-independent UI replay aid + RE goldmine.
+  3. Entity recorder (later) — once you have an entity catalog, same machinery pointed at engine-side classes. This is
+  where monsters/players/projectiles live.
+
+  (1) gives you "everything just in case." (2) gives you structured per-form streams that are easy to grep ("show me
+  every TDncNpcDialog event"). (3) waits on RE work.
+
+  Want me to build (1) and (2) together in the same thread? That's still one PowerShell command, three new output files
+  (baseline.zst, mem.delta.zst, forms.delta.zst), all timestamped into the existing JSONL.
+
+✻ Baked for 27s
+
+> Yeah the reason we should have safety nets is so if the server ever shuts down and we're missing something from         recording, it's good to take a look. We need to timestamp everything correctly though, otherwise we may get out of      order -- the forms, the network, the entity recorders, the raw pcap, the raw heap snapshots ; what else are we          missing for replay and for later reverse engineering work?                    
+
+ Great question to ask now rather than after a few sessions. Here's what I'd add, ordered by how much you'd regret not
+  having it:
+
+  Time & ordering (this is the one most likely to bite you)                                                             
+  Single source of time, with sequence numbers. Right now tshark uses its own clock for the pcap, while Python uses       time.time(). They drift, especially under load, and the wall clock isn't even monotonic. Fix:
+
+  - Switch all JSONL events to time.monotonic_ns() for ordering and time.time_ns() for wall-clock — emit both fields,
+  never just one.
+  - Add a global monotonic seq counter in JsonlWriter, incremented under the same mutex as the write. Every event gets
+  seq. Total order is then guaranteed regardless of timestamp resolution.
+  - PCAP ↔ JSONL sync beacon: every ~1s, send a UDP packet to a loopback port (or any sentinel pattern tshark will
+  capture) and simultaneously emit a JSONL {"kind":"sync","pcap_marker": "<nonce>","t_mono":..., "t_wall":...}. Now you
+  can post-hoc align pcap clock to JSONL clock to sub-ms.
+
+  What else to capture
+
+  Process / module map (RE essential): at session start and on every change, snapshot the list of loaded DLLs with base
+  + size + path + PE hash from M:\pid\<pid>\modules. Without this you can't translate a code address back to
+  "dxrender.exe + 0x12340" months later when offsets have shifted.
+
+  Thread list + entry points: M:\pid\<pid>\threads. Cheap, occasionally invaluable.
+
+  Game build identity: PE timestamp + SHA256 of the main exe and any loaded DLLs. You will want to know exactly which
+  client build produced this recording when you replay 6 months from now.
+
+  Window / viewport metadata: client-area rect, DPI, fullscreen vs windowed, monitor topology. Recorded once at session
+  start + on resize. Even if you don't do pixel-input replay, you'll want this for any visual reconstruction.
+
+  Filesystem capture of client-written files: the game probably writes a log/config/cache somewhere under its install
+  dir (*.log, *.ini, cache/*). At session start snapshot the relevant dirs; at session end, diff and capture changed
+  files. Cheap, small, sometimes the only place game-internal events are recorded.
+
+  Initial-state full memory baseline + VMT census: even with delta recording, you want a complete memory.vmem snapshot
+  at t=0 (zstd it — typically compresses ~10×). Plus a one-shot scan listing every VMT seen on the heap with instance
+  count. That's your "table of contents" for RE.
+
+  Network handshake / crypto state: V2 cipher is per-frame stateless per your code, but capture any login-handshake key
+  exchange explicitly into the JSONL with a kind:"handshake" marker so the stub server can reproduce it during replay.
+
+  Server identity: DNS resolutions and remote IPs/ports actually contacted (you already get this via the pcap, but
+  extracting and emitting kind:"server_endpoint" events makes replay setup trivial — you know which IPs the stub must
+  impersonate).
+
+  Optional but high-value: low-fps screen capture + audio. Not for replay — for human verification during RE. Saves your
+   sanity when you ask "what was actually on screen at t=43.2s?" 5 fps H.264 of the VM viewer window adds maybe 50 MB
+  per 10 minutes. Audio likewise.
+
+  Input (when you decide to add it): host-side mouse/keyboard hook, recorded as {t, type, x_pct, y_pct, button/key,
+  hwnd_state}. Resolution-independent if you store percentages.
+
+  Updated file inventory per session
+
+  recording_<id>.pcap                  # raw all-VM TCP (have)
+  recording_<id>.jsonl                 # all events on one timeline (have, extending)
+  recording_<id>.baseline.zst          # full memory snapshot at t=0 (new)
+  recording_<id>.mem.delta.zst         # 4KB-page deltas (new)
+  recording_<id>.forms.delta.zst       # per-form-instance deltas (new)
+  recording_<id>.entities.delta.zst    # per-entity deltas (later, needs catalog)
+  recording_<id>.modules.json          # module/thread/version snapshot (new)
+  recording_<id>.client_files.tar.zst  # captured game-written files (new)
+  recording_<id>.screen.mp4            # optional 5fps screencap (new, optional)
+  recording_<id>.audio.opus            # optional (new, optional)
+  recording_<id>.input.jsonl           # later, when you decide
+
+  Things I'd explicitly not add
+
+  - Per-frame full memory dumps (covered by deltas, would just be wasteful)
+  - Guest-side instrumentation of any kind (breaks stealth)
+  - Network injection or memory writes at record time (breaks stealth)
+
+  Suggested build order
+
+  1. Clock unification + seq + pcap-sync beacon (small, prevents data corruption you can't recover from later)
+  2. Memory baseline + page deltas (the safety net you asked for)
+  3. All-forms full-instance deltas (covers UI exhaustively)
+  4. Module/thread/version snapshots (cheap, huge RE value)
+  5. Filesystem capture (cheap)
+  6. Optional screen+audio (toggle via flag)
+  7. Entity recorder (needs catalog work first)
+  8. Input recorder (last, after you've tested network-only replay)
+
+  That gives you a self-contained host-record.ps1 that produces a forensically complete session bundle. Server can
+  disappear tomorrow and you'll still have everything.
+
+  Want me to start with step 1 (clock/seq/sync) since it's the foundation everything else relies on?
+
+> Is this going to be heavy? I don't want it to be detectable (e.g. slowing down the VM may give hint) , so ensure that    it is optimized. We don't need recording audio, I believe the game client already loads it by default depending on     map, good on that front. It's all in one script so great. Do we ever need file io, I think maybe just the same          stragey, baseline then diffs maybe?                                                                                   
+● Good instincts on both counts. Let me give you concrete numbers and tuning levers.
+
+  Will it be heavy / detectable?                                                                                        
+  The cost lives almost entirely in MemProcFS reads. Everything else (tshark on host vEthernet, hashing, zstd, disk       writes) runs on host CPU/IO and the guest cannot observe it. So the question is really "how aggressively are we
+  reading from M:\?"
+
+  Per-source budget at the cadences I'd recommend:
+
+  ┌─────────────────────────────┬───────────────┬───────────────────────────────────────────┬─────────────────────┐
+  │           Source            │    Cadence    │              Bytes read/sec               │    Guest impact     │
+  ├─────────────────────────────┼───────────────┼───────────────────────────────────────────┼─────────────────────┤
+  │ Form-poller (existing)      │ 10 Hz         │ ~MB/s                                     │ none observed today │
+  ├─────────────────────────────┼───────────────┼───────────────────────────────────────────┼─────────────────────┤
+  │ Per-form full-instance dump │ 1–2 Hz        │ ~1 MB/s                                   │ negligible          │
+  ├─────────────────────────────┼───────────────┼───────────────────────────────────────────┼─────────────────────┤
+  │ Page-delta heap scan        │ 1 Hz          │ ~50–150 MB/s read, ~2–10 MB/s after dedup │ the one to watch    │
+  ├─────────────────────────────┼───────────────┼───────────────────────────────────────────┼─────────────────────┤
+  │ Module/thread snapshot      │ 0.03 Hz (30s) │ trivial                                   │ none                │
+  ├─────────────────────────────┼───────────────┼───────────────────────────────────────────┼─────────────────────┤
+  │ Baseline (one-shot)         │ t=0 only      │ ~300 MB once                              │ brief, tolerable    │
+  └─────────────────────────────┴───────────────┴───────────────────────────────────────────┴─────────────────────┘
+
+  The page-delta scan is 95% of the cost. To keep it invisible:
+
+  1. Read vmemd\*.vvmem files, not memory.vmem with seeks. MemProcFS caches vmemd contents aggressively; sequential
+  reads of cached regions don't pause the guest. Random seeks into memory.vmem do. Your existing scan_vmt_instances
+  already uses vmemd — keep doing that.
+  2. Adaptive scanning (the big win): after baseline, classify each page by churn:
+    - Stable for ≥10 ticks → demote to "cold" tier, scan every 10th tick
+    - Changed in last tick → "hot" tier, scan every tick
+    - Most of a 400 MB heap is cold (loaded textures, item DB, code-shaped data, string pools). After 30s of warm-up,
+  you're typically scanning <50 MB/tick instead of 400 MB. 5–10× reduction.
+  3. Skip image-backed regions entirely. vvmem regions whose name contains .dll / .exe are already filtered.
+  Texture/asset regions show up as anonymous heap but are stable — adaptive scanning catches them in tier 2.
+  4. Hash + diff on a worker thread, not the read thread. Read thread streams pages out of vmemd as fast as MemProcFS
+  can serve them; hash/diff/compress happens on a separate thread with a bounded queue. Decouples disk-write
+  back-pressure from read cadence.
+  5. Bound CPU at 1 core. zstd-multithread off (single thread, level 3 not 19). Compression is the easiest place to
+  accidentally peg CPU and it gives you nothing — zstd-3 is already 3 GB/s and within ~10% of zstd-19's ratio on random
+  binary data.
+
+  Realistic total impact at 1 Hz with adaptive scanning, after warm-up: host CPU ~5–15% of one core, guest
+  ~unmeasurable. Hyper-V live introspection is the same mechanism EDR products use; a game client can't time-check
+  against it without an external trusted clock, and they don't.
+
+  Lever you can tune at runtime: -MemHz 1 (default), -MemHz 0.5 if you ever see a hint of stutter, -MemHz 2 if you want
+  finer resolution and the guest's not reacting.
+
+  Filesystem capture — you're right to be skeptical
+
+  Skip it. Reasons:
+
+  1. MemProcFS doesn't give you guest filesystem cleanly. It only reconstructs files currently in the page cache
+  (M:\forensic\), which is partial and unpredictable.
+  2. Doing it properly means VSS-snapshotting the VHDX from the host. Stealth-safe but operationally heavy and overlaps
+  almost completely with what the memory baseline already captures (game writes things to disk, but those things first
+  existed in process memory).
+  3. You don't need it for replay. Replay drives the live client which will recreate its own logs/caches.
+  4. For RE, memory deltas dominate. Anything the client cares about is in RAM at some point.
+
+  If a specific file ever turns out to matter (e.g. a chat log only the game writes), we can add an opportunistic VSS
+  snapshot at session-end as a one-line PowerShell cmdlet (Checkpoint-VM or New-VMSnapshot against the VHDX). Doesn't
+  need to be in the hot path. Punt until you have a concrete use case.
+
+  One simplification I want to make
+
+  I overengineered earlier with the pcap-sync beacon. On Windows, both Npcap (tshark's capture source) and Python's
+  time.time_ns() ultimately read the same hardware clock (QPC via GetSystemTimePreciseAsFileTime). They're already
+  aligned to within a few microseconds without any beacon. Drop the beacon — just record both t_mono_ns and t_wall_ns on
+   every JSONL event and we're fine.
+
+  Revised plan
+
+  I'll start with these in host_recording_stream.py, all on one timeline:
+
+  1. Clock unification: every event gets t_mono_ns + t_wall_ns + global seq
+  2. Memory baseline + adaptive page-delta thread (zstd-3, worker-thread compression)
+  3. All-forms full-instance recorder (extends existing form-poller)
+  4. Module/thread/version snapshot at session start + on module list change
+  5. Skip filesystem capture for now
+
+  host-record.ps1 gets two new params: -MemHz 1 and -NoMem (kill switch in case you want to record a session without the
+   memory thread).
+
+  Sound good? Reply "go" and I'll write it.
+----
+ Since we're copying from read only M:\ we could probably get away with late recoeding, as long as we queue it           correctly against other collections e.g. pcap. It needs to be in the right order                                      
+● Important distinction here that's worth getting right, because you're half-correct in a way that matters.
+
+  What can be deferred vs what can't                                                                                    
+  M:\ is a live view of guest RAM, not a time machine. Reading it at t+5 gives you the memory state at t+5, not the       state at t. So we can't queue a "snapshot point" and read it later — by then the bytes have changed and the timestamp
+  would be a lie.
+
+  What that means in practice:
+
+  ┌─────────────────────────────────────────┬──────────────────────────────────────────┐
+  │             Pipeline stage              │           Can it be deferred?            │
+  ├─────────────────────────────────────────┼──────────────────────────────────────────┤
+  │ The read itself (open(vvmem).read())    │ No — must happen at snapshot time        │
+  ├─────────────────────────────────────────┼──────────────────────────────────────────┤
+  │ Hashing pages                           │ Yes                                      │
+  ├─────────────────────────────────────────┼──────────────────────────────────────────┤
+  │ Diffing against last hashes             │ Yes                                      │
+  ├─────────────────────────────────────────┼──────────────────────────────────────────┤
+  │ Compressing changed pages               │ Yes                                      │
+  ├─────────────────────────────────────────┼──────────────────────────────────────────┤
+  │ Writing to disk                         │ Yes                                      │
+  ├─────────────────────────────────────────┼──────────────────────────────────────────┤
+  │ Updating the JSONL with mem_delta event │ Yes (with timestamp from capture moment) │
+  └─────────────────────────────────────────┴──────────────────────────────────────────┘
+
+  So: read on time, process on a worker. That's what I was proposing already, and I should have explained it more
+  clearly.
+
+  The "right order" guarantee — easier than you'd think
+
+  You don't actually need clever queuing for ordering. You just need a single global atomic seq counter:
+
+  JsonlWriter.next_seq()  # under one mutex, monotonic
+
+  Every event — net frame, form change, memory delta chunk, sync — calls next_seq() at the moment of capture, not at the
+   moment of write. The number is allocated synchronously; the write can happen whenever. Replay sorts by seq and is
+  guaranteed correctly ordered regardless of how late the writer thread got around to flushing it.
+
+  Pcap is its own file with its own per-packet timestamps from the same hardware clock — already correctly ordered
+  internally. Cross-correlating pcap to JSONL is by timestamp comparison post-hoc; they can't be assigned the same seq
+  because tshark doesn't know about it. That's fine.
+
+  The actual deferred-processing architecture
+
+  [Read thread] (must run on cadence)
+      ├─ open vmemd files, read pages
+      ├─ stamp t_mono_ns, allocate seq for this snapshot
+      └─ push (seq, t, raw_pages) onto bounded queue → return immediately
+
+  [Worker thread] (drains queue at its own pace)
+      ├─ hash pages, diff vs last
+      ├─ zstd-compress changed pages
+      ├─ append to .mem.delta.zst
+      └─ emit JSONL event with original (seq, t)
+
+  If the worker falls behind, the bounded queue back-pressures the reader. You get one of:
+  - A skipped tick, logged as {"kind":"mem_skip","reason":"queue_full","seq":...} so you know about it
+  - A throttled cadence
+
+  Either is preferable to letting the queue grow unboundedly into RAM. The reader never blocks the rest of the system,
+  and ordering is preserved because seq is allocated at capture time, not write time.
+
+  What this enables
+
+  - Memory thread can take all the time it wants compressing without slowing the form-poller or the network sniffer
+  - Disk I/O hiccups (e.g. antivirus stalling a write) won't propagate back to MemProcFS reads
+  - We can cheaply add zstd-19 long-mode (better ratio, slow) on the worker because the read thread doesn't care
+  - A burst of activity (lots of changed pages all at once) gets smoothed out
+
+  Bottom line
+
+  - Reads themselves are real-time, but cheap and on a single dedicated thread. ~50–150 MB/s of cached vmemd reads is
+  well within MemProcFS's capability without taxing the guest.
+  - Everything downstream is async with a bounded queue. No back-pressure to the reader except via explicit skip events.
+  - Ordering is via a global seq counter assigned at capture time, not by timestamp comparison or write order.
+
+  Same plan, then? "Go" and I'll build it.
+
+
+> Diagram please
+
+●                                   ┌─────────────────────────────────────────────┐
+                                    │           GUEST VM (game client)            │
+                                    │   ┌─────────────────────────────────────┐   │
+                                    │   │  DXRender.exe — Delphi/D3D process  │   │
+                                    │   │   heap | forms | entities | sockets │   │
+                                    │   └─────────────────────────────────────┘   │
+                                    │           ▲                  │              │
+                                    │   live RAM│      TCP frames  │              │
+                                    └───────────┼──────────────────┼──────────────┘
+                                                │ (read-only,      │
+                                                │  invisible to    │
+                                                │  guest)          │
+                  ┌─────────────────────────────┴──────┐    ┌──────▼──────────┐
+                  │   MemProcFS  →  M:\pid\<pid>\...   │    │  vEthernet NIC  │
+                  │   memory.vmem | vmemd\*.vvmem      │    │   (host side)   │
+                  │   modules | threads | name.txt     │    └──────┬──────────┘
+                  └─────────────────────────────────────┘           │
+                                                                    │ passive sniff
+                    ┌──────────────────────────────────────────────┬┴──────────────┐
+                    │                  HOST  (host-record.ps1)     │               │
+                    │                                              ▼               │
+                    │                                       ┌─────────────┐        │
+                    │                                       │  tshark #1  │        │
+                    │                                       │  raw all-VM │ ─────► recording_<id>.pcap
+                    │                                       │  TCP capture│        │
+                    │                                       └─────────────┘        │
+                    │                                                              │
+                    │                                       ┌─────────────┐        │
+                    │                                       │  tshark #2  │        │
+                    │                                       │ game ports  │        │
+                    │                                       │ (1818/19/   │        │
+                    │                                       │  18123/24)  │        │
+                    │                                       └──────┬──────┘        │
+                    │                                              │ pcap on stdout │
+                    │                                              ▼                │
+                    │  ┌────────────────────────────────────────────────────────┐  │
+                    │  │      host_recording_stream.py — single process         │  │
+                    │  │                                                        │  │
+                    │  │  ┌─────────────┐  ┌────────────┐  ┌─────────────────┐  │  │
+                    │  │  │ form-poller │  │net-sniffer │  │  mem-recorder   │  │  │
+                    │  │  │  (10 Hz)    │  │            │  │   (1 Hz read)   │  │  │
+                    │  │  ├─────────────┤  ├────────────┤  ├─────────────────┤  │  │
+                    │  │  │ scan VMTs   │  │ parse pcap │  │ vmemd→pages     │  │  │
+                    │  │  │ form_appear │  │ V2 frames  │  │ adaptive tier   │  │  │
+                    │  │  │ form_destroy│  │ V2 decrypt │  │ stamp seq + t   │  │  │
+                    │  │  │ field deltas│  │ (world)    │  │ push to queue ──┼─┐│  │
+                    │  │  │ instance    │  │ opcode +   │  │                 │ ││  │
+                    │  │  │ full-byte   │  │ payload    │  │                 │ ││  │
+                    │  │  │ delta       │  │            │  │                 │ ││  │
+                    │  │  └──────┬──────┘  └─────┬──────┘  └─────────────────┘ ││  │
+                    │  │         │               │                             ││  │
+                    │  │         │               │         ┌──────────────────┐││  │
+                    │  │         │               │         │ mem-worker thread│◄┘│  │
+                    │  │         │               │         │ ─────────────────│  │  │
+                    │  │         │               │         │ xxhash64 pages   │  │  │
+                    │  │         │               │         │ diff vs last     │  │  │
+                    │  │         │               │         │ zstd-3 changed   │  │  │
+                    │  │         │               │         │ append to file ──┼──┼─► recording_<id>.mem.delta.zst
+                    │  │         │               │         │ emit JSONL evt   │  │  │
+                    │  │         │               │         └────────┬─────────┘  │  │
+                    │  │         │               │                  │            │  │
+                    │  │         │               │         ┌────────▼─────────┐  │  │
+                    │  │         │               │         │ module/thread    │  │  │
+                    │  │         │               │         │ snapshot         │  │  │
+                    │  │         │               │         │ (30s + on chg)   │  │  │
+                    │  │         │               │         └────────┬─────────┘  │  │
+                    │  │         │               │                  │            │  │
+                    │  │         ▼               ▼                  ▼            │  │
+                    │  │  ┌──────────────────────────────────────────────────┐   │  │
+                    │  │  │            JsonlWriter  (mutex)                  │   │  │
+                    │  │  │   next_seq() — monotonic, allocated AT capture   │   │  │
+                    │  │  │   each event:  {seq, t_mono_ns, t_wall_ns, ...}  │   │  │
+                    │  │  └──────────────────────────┬───────────────────────┘   │  │
+                    │  └─────────────────────────────┼───────────────────────────┘  │
+                    │                                │                              │
+                    │                                ▼                              │
+                    │                       recording_<id>.jsonl                    │
+                    │                       recording_<id>.baseline.zst             │
+                    │                       recording_<id>.modules.json             │
+                    │                                                               │
+                    └───────────────────────────────────────────────────────────────┘
+
+                                          ──────  output bundle  ──────
+
+        recording_<id>.pcap            ◄ raw all-VM TCP (safety net)
+        recording_<id>.jsonl           ◄ unified timeline: net | form | mem | module events
+        recording_<id>.baseline.zst    ◄ full memory snapshot @ t=0
+        recording_<id>.mem.delta.zst   ◄ 4 KB-page deltas, hot/cold tiered
+        recording_<id>.modules.json    ◄ DLL/thread/version snapshots
+
+
+        KEY ORDERING RULE
+        ─────────────────
+        seq is allocated at the MOMENT OF CAPTURE under a single mutex.
+        Writes/compression can lag arbitrarily — replay sorts by seq and
+        is guaranteed correctly ordered. pcap timestamps come from the
+        same hardware clock (QPC) as t_mono_ns and align post-hoc.
+
+
+        STEALTH BOUNDARY
+        ────────────────
+        Everything above the dashed line at the top runs inside the guest
+        and is the game client. Everything below runs on the host and is
+        invisible to the guest:
+          • MemProcFS reads      → hypervisor-level, no guest hooks
+          • tshark               → host NIC sniff, passive
+          • No writes to guest   → enforced; never crossed
+
+  Ready to build when you say "go."
+
+✻ Baked for 32s
+
+> flow chart please
+
+●                               ┌────────────────────────────┐
+                                │  user runs host-record.ps1 │
+                                │     <session_id>           │
+                                └─────────────┬──────────────┘
+                                              │
+                                              ▼
+                                ┌────────────────────────────┐
+                                │ check M:\ mounted?         │
+                                │ check tshark exists?       │
+                                │ check session id unused?   │
+                                └─────────────┬──────────────┘
+                                              │ ok
+                                              ▼
+                                ┌────────────────────────────┐
+                                │ start tshark #1            │
+                                │ (raw all-VM TCP → pcap)    │
+                                └─────────────┬──────────────┘
+                                              │
+                                              ▼
+                            ┌─────────────────────────────────┐
+                            │ poll M:\pid for DXRender name   │◄──┐
+                            │ found?                          │   │ wait 200ms
+                            └────────────┬────────────────────┘   │ (max 600s)
+                                         │ no  ─────────────────────┘
+                                         │ yes
+                                         ▼
+                                ┌────────────────────────────┐
+                                │  launch python recorder    │
+                                │  --pid <dxr> --id <s>      │
+                                └─────────────┬──────────────┘
+                                              │
+                                              ▼
+                                ┌────────────────────────────┐
+                                │  build form/entity tables  │
+                                │  open JsonlWriter          │
+                                │  emit session_start        │
+                                └─────────────┬──────────────┘
+                                              │
+                         ┌────────────────────┼────────────────────────────┐
+                         │                    │                            │
+                         ▼                    ▼                            ▼
+                ┌───────────────┐    ┌───────────────┐          ┌────────────────────┐
+                │ form-poller   │    │ net-sniffer   │          │  mem-recorder      │
+                │ thread        │    │ thread        │          │  thread (read)     │
+                └───────┬───────┘    └───────┬───────┘          └─────────┬──────────┘
+                        │                    │                            │
+                        ▼                    ▼                            ▼
+                ┌───────────────┐    ┌───────────────┐          ┌────────────────────┐
+                │ resolve VMTs  │    │ spawn tshark  │          │ enumerate vmemd    │
+                │ scan heap     │    │ #2 → stdout   │          │ filter heap only   │
+                │ list live     │    │ pcap stream   │          │ skip stack/dll/exe │
+                └───────┬───────┘    └───────┬───────┘          └─────────┬──────────┘
+                        │                    │                            │
+                        ▼                    ▼                            ▼
+                ┌───────────────┐    ┌───────────────┐          ┌────────────────────┐
+                │ on tick:      │    │ on packet:    │          │  baseline (once):  │
+                │  read fields  │    │  parse eth/   │          │   read all pages   │
+                │  read full    │    │   ip/tcp      │          │   xxhash each 4KB  │
+                │  instance     │    │  reassemble   │          │   zstd → file      │
+                │  diff vs prev │    │  V2 frames    │          │   record hashes    │
+                └───────┬───────┘    └───────┬───────┘          └─────────┬──────────┘
+                        │                    │                            │
+                        ▼                    ▼                            ▼
+                ┌───────────────┐    ┌───────────────┐          ┌────────────────────┐
+                │ change?       │    │ world port?   │          │ on tick:           │
+                ├───────┬───────┤    ├──┬─────────┬──┤          │  pick pages by tier│
+                │ yes   │ no    │    │yes│       │no│          │   hot=every tick   │
+                │       │ skip  │    │   │       │  │          │   cold=every 10th  │
+                ▼       └───────┘    ▼   │       ▼  │          │  read those pages  │
+                │                    │   │       │  │          └─────────┬──────────┘
+                │           ┌────────┘   │       │  │                    │
+                │           │            │       │  │                    ▼
+                │           ▼            │       │  │          ┌────────────────────┐
+                │   ┌───────────────┐    │       │  │          │ allocate seq+t     │
+                │   │ V2 decrypt    │    │       │  │          │ push (seq,t,pages) │
+                │   │ extract opcode│    │       │  │          │ to bounded queue   │
+                │   │ + payload     │    │       │  │          └─────────┬──────────┘
+                │   └───────┬───────┘    │       │  │                    │
+                │           │            │       │  │                    ▼
+                │           │   ┌────────┘       │  │          ┌────────────────────┐
+                │           │   │                │  │          │ queue full?        │
+                │           │   │                │  │          ├──────┬─────────────┤
+                │           │   │                │  │          │ no   │ yes         │
+                │           │   │                │  │          │      ▼             │
+                │           │   │                │  │          │  emit mem_skip     │
+                │           │   │                │  │          │  drop tick         │
+                │           │   │                │  │          │      │             │
+                │           │   │                │  │          │      ▼             │
+                │           │   │                │  │          │   ┌────────────────────┐
+                │           │   │                │  │          │   │  mem-worker thread │
+                │           │   │                │  │          │   │  (drain queue)     │
+                │           │   │                │  │          │   └─────────┬──────────┘
+                │           │   │                │  │          │             │
+                │           │   │                │  │          │             ▼
+                │           │   │                │  │          │   ┌────────────────────┐
+                │           │   │                │  │          │   │ hash each page     │
+                │           │   │                │  │          │   │ diff vs last hash  │
+                │           │   │                │  │          │   │ promote/demote tier│
+                │           │   │                │  │          │   └─────────┬──────────┘
+                │           │   │                │  │          │             │
+                │           │   │                │  │          │             ▼
+                │           │   │                │  │          │   ┌────────────────────┐
+                │           │   │                │  │          │   │ any changed?       │
+                │           │   │                │  │          │   ├──────┬─────────────┤
+                │           │   │                │  │          │   │ no   │ yes         │
+                │           │   │                │  │          │   │      ▼             │
+                │           │   │                │  │          │   │  zstd-3 + append   │
+                │           │   │                │  │          │   │  to .delta.zst     │
+                │           │   │                │  │          │   │      │             │
+                ▼           ▼   ▼                ▼  ▼          ▼   ▼      ▼             │
+                ┌─────────────────────────────────────────────────────────────────────┐
+                │                  JsonlWriter.emit({...})                            │
+                │   ─────────────────────────────────────────────────                 │
+                │   acquire mutex                                                     │
+                │   if no seq supplied: seq = next_seq()  (else use captured seq)     │
+                │   t_mono_ns = monotonic_ns()  (or use captured t)                   │
+                │   t_wall_ns = time_ns()       (or use captured t)                   │
+                │   write json line                                                   │
+                │   release mutex                                                     │
+                └─────────────────────────────┬───────────────────────────────────────┘
+                                              │
+                                              ▼
+                                ┌────────────────────────────┐
+                                │  Ctrl+C  /  signal         │
+                                └─────────────┬──────────────┘
+                                              │
+                                              ▼
+                                ┌────────────────────────────┐
+                                │ stop_evt.set()             │
+                                │ join all threads (5s ea)   │
+                                │ drain mem-worker queue     │
+                                │ flush JsonlWriter          │
+                                │ stop tshark #1             │
+                                │ emit session_stop          │
+                                └─────────────┬──────────────┘
+                                              │
+                                              ▼
+                                ┌────────────────────────────┐
+                                │  output bundle written:    │
+                                │   .pcap                    │
+                                │   .jsonl                   │
+                                │   .baseline.zst            │
+                                │   .mem.delta.zst           │
+                                │   .modules.json            │
+                                └────────────────────────────┘
+
+  Ready when you give the go.
+
+✻ Cooked for 32s
