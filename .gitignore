@@ -11,3 +11,10 @@ replay/_vendor/
 **/resize.log
 **/windows_dump.txt
 /tmp/v2_server.log
+
+# Session recordings — large (jsonl + pcap + per-click PNG patches).
+sessions/
+
+# macOS metadata.
+.DS_Store
+**/.DS_Store

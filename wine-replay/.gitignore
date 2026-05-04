@@ -1,0 +1,2 @@
+# Vendored game install (~2.5GB) — populated by `make vendor-client`.
+client/
