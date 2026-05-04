@@ -1,0 +1,19 @@
+{
+  "id": "become-lacey-v1",
+  "schema": "v2.0",
+  "iface": 4,
+  "client_sha": null,
+  "vm_res": {
+    "w": 1440,
+    "h": 900
+  },
+  "started_wall_ns": 1777858593370831400,
+  "started_mono_ns": 79554984000000,
+  "stopped_wall_ns": 1777858673893950500,
+  "stopped_mono_ns": 79635515000000,
+  "exit_reason": "signal",
+  "files": {
+    "pcap": "recording_become-lacey-v1.pcap",
+    "jsonl": "recording_become-lacey-v1.jsonl"
+  }
+}
