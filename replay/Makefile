@@ -222,8 +222,8 @@ endif
 _auto-replay: deploy server-bg
 	@$(MAKE) run FULLSCREEN=0
 	@$(MAKE) resize
-	@echo "[_auto-replay] sleeping 3s for handshake + server-select render"
-	@sleep 3
+	@echo "[_auto-replay] sleeping $(SPEED)-scaled handshake delay (3s / SPEED)"
+	@sleep $$($(PYTHON) -c "print(3.0 / max($(SPEED), 0.001))")
 	@$(MAKE) input
 
 clean-tasks:

@@ -660,6 +660,19 @@ def _net_key(ev: dict):
     return ev.get("seq")
 
 
+def _ctrl_send_event(ctrl_addr, obj) -> None:
+    import socket as _s
+    try:
+        s = _s.create_connection(ctrl_addr, timeout=2)
+        try:
+            s.sendall((json.dumps(obj) + "\n").encode("utf-8"))
+        finally:
+            try: s.close()
+            except OSError: pass
+    except OSError as e:
+        print(f"[ctrl] failed to send {obj}: {e}", file=sys.stderr)
+
+
 def _ctrl_listener(ctrl_addr, ack_fn, stop_flag: List[bool]):
     """Background thread: connect to emulator's control bus and ack each
     {seq,port,dir,opcode} JSON line."""
@@ -1152,6 +1165,10 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
                   f"vk=0x{vk:02X} {'up' if up else 'down'}", file=sys.stderr)
             send_key(vk, up=up)
 
+    if ctrl_addr is not None:
+        print("[replay] timeline exhausted; signaling input_done to emulator",
+              file=sys.stderr)
+        _ctrl_send_event(ctrl_addr, {"event": "input_done"})
     print("[replay] done", file=sys.stderr)
 
 

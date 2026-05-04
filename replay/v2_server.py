@@ -323,10 +323,45 @@ class ControlBus:
                   file=sys.stderr, flush=True)
             with self.lock:
                 self.clients.append(conn)
+            t = threading.Thread(target=self._reader, args=(conn, addr),
+                                 daemon=True)
+            t.start()
         try:
             s.close()
         except OSError:
             pass
+
+    def _reader(self, conn: socket.socket, addr) -> None:
+        conn.settimeout(0.5)
+        buf = b""
+        while not self.stop_evt.is_set():
+            try:
+                chunk = conn.recv(4096)
+            except (TimeoutError, socket.timeout):
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if obj.get("event") == "input_done":
+                    print(f"[ctrl] input_done received from {addr[0]}:{addr[1]}; "
+                          f"shutting down", file=sys.stderr, flush=True)
+                    self.stop_evt.set()
+        with self.lock:
+            if conn in self.clients:
+                self.clients.remove(conn)
+        try: conn.close()
+        except OSError: pass
 
     def broadcast(self, seq, port, direction, opcode) -> None:
         self._send({"seq": seq, "port": port, "dir": direction,
