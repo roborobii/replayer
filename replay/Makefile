@@ -83,9 +83,11 @@ help:
 	@echo "  install-cv2     download Win cp311 wheels (cv2,numpy,Pillow) on Mac, scp + offline pip install on RC3"
 	@echo "  cv-calibrate    SEQ=<n> RECORDING_ID=<id>: run replayer's CV match against live RC3 game window; pull annotated PNG to /tmp/cv_calibrate_<seq>.png"
 
+SWAP_FLAG := $(if $(SWAP_WITH_CHARACTER),--swap-with-character '$(SWAP_WITH_CHARACTER)',)
+
 server:
 	@pkill -f 'v2_server.py' 2>/dev/null || true
-	$(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP) --speed $(SPEED)
+	$(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP) --speed $(SPEED) $(SWAP_FLAG)
 
 server-bg:
 	@pkill -9 -f 'v2_server.py' 2>/dev/null || true
@@ -94,7 +96,7 @@ server-bg:
 		[ -n "$$pid" ] && kill -9 $$pid 2>/dev/null || true; \
 	done
 	@sleep 0.5
-	@nohup $(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP) --speed $(SPEED) > /tmp/v2_server.log 2>&1 &
+	@nohup $(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP) --speed $(SPEED) $(SWAP_FLAG) > /tmp/v2_server.log 2>&1 &
 	@sleep 1
 	@head -10 /tmp/v2_server.log
 	@if grep -q 'Address already in use' /tmp/v2_server.log; then echo "[server-bg] FAIL: port already in use — see log"; exit 1; fi

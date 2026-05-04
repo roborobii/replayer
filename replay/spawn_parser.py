@@ -63,8 +63,8 @@ def parse_spawn_frame(payload_bytes: bytes) -> dict | None:
         name = None
         if len(payload_bytes) >= 58:
             name_len = struct.unpack_from("<H", payload_bytes, 56)[0]
-            end = 58 + name_len
-            if name_len > 0 and end <= len(payload_bytes):
+            end = min(58 + name_len, len(payload_bytes))
+            if name_len > 0 and end > 58:
                 try:
                     name = payload_bytes[58:end].decode("utf-8")
                 except UnicodeDecodeError:

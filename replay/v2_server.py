@@ -32,6 +32,11 @@ from typing import Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cipher as _world_cipher
 
+try:
+    from spawn_parser import parse_spawn_frame
+except ImportError:
+    parse_spawn_frame = None  # swap disabled if parser missing
+
 
 # ---------------------------------------------------------------------------
 # Recording load
@@ -54,6 +59,147 @@ def _paced_sleep(target_ns: int, stop: Optional[threading.Event]) -> bool:
         if stop is not None and stop.is_set():
             return False
         time.sleep(min(dt, 100_000_000) / 1e9)
+
+
+def _byte_swap_actor_ids(payload: bytes, own_le: bytes, target_le: bytes) -> bytes:
+    # Single-pass bidirectional swap of two 2-byte values. Walks
+    # payload looking for either own_le or target_le at any offset and
+    # substitutes the opposite. Skips past the modified bytes so we
+    # don't double-swap.
+    if own_le == target_le:
+        return payload
+    out = bytearray(payload)
+    i = 0
+    n = len(out) - 1
+    while i < n:
+        pair = bytes(out[i:i + 2])
+        if pair == own_le:
+            out[i:i + 2] = target_le
+            i += 2
+        elif pair == target_le:
+            out[i:i + 2] = own_le
+            i += 2
+        else:
+            i += 1
+    return bytes(out)
+
+
+def swap_self_with_character(by_port: Dict[int, List[dict]], swap_name: str) -> None:
+    # Make the live client render `swap_name` as the player by
+    # rewriting the recorded session in three places:
+    #   1. World self_spawn payload — bytes replaced with target's
+    #      spawn frame so appearance / name / coords / actor_id all
+    #      flip on the world entry frame.
+    #   2. Lobby char-list (op=0xd4 on 1819) — the player's slot is
+    #      renamed to the target's FULL spawn name (e.g. "Lacey_",
+    #      "chikuro..."). Critical: must match the spawn-frame name
+    #      exactly so the client's "I selected X" sent in C2S matches
+    #      the spawn name X' the world server sends back.
+    #   3. Byte-level actor_id swap across all world S2C frames —
+    #      subsequent packets reference the player by 2-byte LE id;
+    #      without flipping these, the client treats them as targeting
+    #      "old self" (now another actor) and re-renders the original
+    #      avatar as the player.
+    if not swap_name or parse_spawn_frame is None:
+        return
+    world_q = by_port.get(18123, [])
+    own_idx = target_idx = None
+    own_name = target_name = None
+    own_actor_id = target_actor_id = None
+    swap_lower = swap_name.lower()
+    for idx, rec in enumerate(world_q):
+        if rec.get("dir") != "S2C":
+            continue
+        try:
+            payload = bytes.fromhex(rec["payload_hex"])
+        except (KeyError, ValueError):
+            continue
+        parsed = parse_spawn_frame(payload)
+        if parsed is None or parsed.get("kind") != "self_spawn":
+            continue
+        name = parsed.get("name")
+        actor_id = parsed.get("actor_id")
+        if not name or actor_id is None:
+            continue
+        if own_idx is None:
+            own_idx, own_name, own_actor_id = idx, name, actor_id
+            continue
+        if target_idx is None and name.lower().startswith(swap_lower):
+            target_idx, target_name, target_actor_id = idx, name, actor_id
+            break
+    if own_idx is None:
+        print(f"[swap] no self_spawn with a name found; cannot swap",
+              file=sys.stderr, flush=True)
+        return
+    if own_name and own_name.lower().startswith(swap_lower):
+        print(f"[swap] {own_name!r} is already 'self'; no-op",
+              file=sys.stderr, flush=True)
+        return
+    if target_idx is None:
+        print(f"[swap] no spawn matching '{swap_name}' found in port-18123 S2C",
+              file=sys.stderr, flush=True)
+        return
+
+    own_rec = world_q[own_idx]
+    target_rec = world_q[target_idx]
+    print(f"[swap] world_spawn: {own_name!r}#{own_actor_id} (seq={own_rec['seq']}) "
+          f"-> {target_name!r}#{target_actor_id} (seq={target_rec['seq']})",
+          file=sys.stderr, flush=True)
+    own_rec["payload_hex"] = target_rec["payload_hex"]
+    own_rec["len"] = target_rec["len"]
+    own_rec["opcode"] = target_rec["opcode"]
+
+    # 2. Rename own's slot in lobby char-list (op=0xd4) using the
+    # target's FULL spawn-frame name so client-selected name matches
+    # what the world spawn sends back.
+    NAME_LEN = 12
+    own_padded = own_name.encode("utf-8")[:NAME_LEN].ljust(NAME_LEN, b"\x00")
+    new_padded = target_name.encode("utf-8")[:NAME_LEN].ljust(NAME_LEN, b"\x00")
+    renames = 0
+    for port in (1818, 1819):
+        for rec in by_port.get(port, []):
+            if rec.get("dir") != "S2C" or rec.get("opcode") != 0xd4:
+                continue
+            try:
+                payload = bytes.fromhex(rec["payload_hex"])
+            except (KeyError, ValueError):
+                continue
+            if own_padded not in payload:
+                continue
+            rec["payload_hex"] = payload.replace(own_padded, new_padded, 1).hex()
+            renames += 1
+            print(f"[swap] charlist 0xd4 seq={rec['seq']} port={port}: "
+                  f"slot {own_name!r} -> {target_name!r}",
+                  file=sys.stderr, flush=True)
+    if renames == 0:
+        print(f"[swap] WARN: no 0xd4 char-list frames contained "
+              f"{own_name!r} — char-select will not show {target_name!r}",
+              file=sys.stderr, flush=True)
+
+    # 3. Byte-level actor_id swap across all world S2C frames. Skip
+    # the spawn frame we already replaced to avoid double-rewriting.
+    own_le = own_actor_id.to_bytes(2, "little")
+    target_le = target_actor_id.to_bytes(2, "little")
+    swapped = 0
+    for port in (18123, 18124):
+        for rec in by_port.get(port, []):
+            if rec.get("dir") != "S2C":
+                continue
+            if rec is own_rec:
+                continue
+            try:
+                payload = bytes.fromhex(rec["payload_hex"])
+            except (KeyError, ValueError):
+                continue
+            if own_le not in payload and target_le not in payload:
+                continue
+            new_payload = _byte_swap_actor_ids(payload, own_le, target_le)
+            if new_payload != payload:
+                rec["payload_hex"] = new_payload.hex()
+                swapped += 1
+    print(f"[swap] actor_id byte-swap {own_actor_id} <-> {target_actor_id} "
+          f"applied to {swapped} world S2C frame(s)",
+          file=sys.stderr, flush=True)
 
 
 def load_net_events_by_port(jsonl_path: str) -> Dict[int, List[dict]]:
@@ -642,6 +788,11 @@ def main() -> int:
     ap.add_argument("--world-gate-timeout-s", type=float, default=30.0,
                     help="if input progress stalls this long, push the next "
                          "S2C anyway (prevents deadlock if replayer dies).")
+    ap.add_argument("--swap-with-character", default=None,
+                    help="replace the recorded self_spawn payload with the "
+                         "spawn frame of NAME (case-insensitive prefix match) "
+                         "found later in the recording's port-18123 S2C "
+                         "queue. Live client renders that character as self.")
     args = ap.parse_args()
     CFG["pace"] = not args.no_pace
     CFG["speed"] = float(args.speed) or 1.0
@@ -655,6 +806,9 @@ def main() -> int:
     by_port = load_net_events_by_port(args.recording)
     print(f"loaded {sum(len(v) for v in by_port.values())} net events "
           f"across ports {sorted(by_port.keys())}", file=sys.stderr, flush=True)
+
+    if args.swap_with_character:
+        swap_self_with_character(by_port, args.swap_with_character)
 
     all_t = [r["t_ns"] for q in by_port.values() for r in q
              if r.get("t_ns") is not None]
