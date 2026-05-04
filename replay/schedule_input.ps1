@@ -10,7 +10,8 @@ param(
     [int]$CtrlPort = 18999,
     [int]$StopAtSeq = -1,
     [ValidateSet("sendinput","postmessage")] [string]$ClickMode = "sendinput",
-    [string]$CvDebugDir = ""
+    [string]$CvDebugDir = "",
+    [double]$Speed = 1.0
 )
 $ErrorActionPreference = "Stop"
 $replayDir = "C:\Users\RC3\replay"
@@ -23,7 +24,7 @@ if (-not (Test-Path $pythonw)) { throw "missing $pythonw (embedded distro should
 # pythonw.exe runs without a console window, so SendInput clicks land on
 # the foreground game instead of a stray cmd box. Logs come out via the
 # in-script redirect in input_replayer.py.
-$argLine = "`"$replayer`" `"$jsonl`" --window-title `"$WindowTitle`" --start-from $StartFrom --x-correction $XCorrection --y-correction $YCorrection --left-offset $LeftOffset --click-mode $ClickMode"
+$argLine = "`"$replayer`" `"$jsonl`" --window-title `"$WindowTitle`" --start-from $StartFrom --x-correction $XCorrection --y-correction $YCorrection --left-offset $LeftOffset --click-mode $ClickMode --speed $Speed"
 if ($TopOffset -ge 0) { $argLine += " --top-offset $TopOffset" }
 if ($CtrlHost -ne "") { $argLine += " --ctrl-host $CtrlHost --ctrl-port $CtrlPort" }
 if ($CvDebugDir -ne "") { $argLine += " --cv-debug-dir `"$CvDebugDir`"" }

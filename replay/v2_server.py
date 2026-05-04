@@ -40,7 +40,7 @@ PLAINTEXT_PORTS = {1818, 1819, 18124}
 KEEPALIVE_OP = 0x05  # 3-byte "010005" heartbeat — noise on plaintext ports.
 
 # Replay-time config; populated in main() before any handler runs.
-CFG: Dict[str, object] = {"pace": True}
+CFG: Dict[str, object] = {"pace": True, "speed": 1.0}
 
 
 def _paced_sleep(target_ns: int, stop: Optional[threading.Event]) -> bool:
@@ -252,6 +252,7 @@ def _flush_s2c(sock: socket.socket, queue: List[dict], cursor: int, port: int, l
                ctrl: "ControlBus", rewrite_ip: Optional[bytes],
                prod_ips: List[bytes]) -> int:
     pace = bool(CFG.get("pace", True))
+    speed = float(CFG.get("speed", 1.0)) or 1.0
     rec_t0: Optional[int] = None
     play_t0 = time.monotonic_ns()
     while cursor < len(queue) and queue[cursor]["dir"] == "S2C":
@@ -259,7 +260,7 @@ def _flush_s2c(sock: socket.socket, queue: List[dict], cursor: int, port: int, l
         if pace and rec.get("t_ns") is not None:
             if rec_t0 is None:
                 rec_t0 = rec["t_ns"]
-            target = play_t0 + (rec["t_ns"] - rec_t0)
+            target = play_t0 + int((rec["t_ns"] - rec_t0) / speed)
             if not _paced_sleep(target, None):
                 return cursor
         try:
@@ -408,11 +409,12 @@ def handle_world_conn(sock: socket.socket, addr, port: int, queue: List[dict],
         if pace and rec_t0 is not None:
             log(f"[pace] world S2C: {len(s2c_recs)} frames spanning {rec_span_s:.1f}s (rec) starting playback")
         sent = 0
+        speed = float(CFG.get("speed", 1.0)) or 1.0
         for rec in s2c_recs:
             if stop.is_set():
                 return
             if pace and rec_t0 is not None and rec.get("t_ns") is not None:
-                target = play_t0 + (rec["t_ns"] - rec_t0)
+                target = play_t0 + int((rec["t_ns"] - rec_t0) / speed)
                 if not _paced_sleep(target, stop):
                     return
             try:
@@ -536,8 +538,14 @@ def main() -> int:
     ap.add_argument("--no-pace", action="store_true",
                     help="disable wall-clock S2C pacing; burst all frames at line rate "
                          "(faster iteration; default is pacing on)")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="playback speed multiplier for S2C pacing. 2.0 = "
+                         "deliver server packets twice as fast; pair with "
+                         "the replayer's --speed so input + network stay "
+                         "synchronized.")
     args = ap.parse_args()
     CFG["pace"] = not args.no_pace
+    CFG["speed"] = float(args.speed) or 1.0
 
     if not os.path.isfile(args.recording):
         print(f"recording not found: {args.recording}", file=sys.stderr)

@@ -30,6 +30,15 @@ Y_CORRECTION ?= 5
 # WM_LBUTTONDOWN/UP directly to XenClient's HWND).
 CLICK_MODE   ?= sendinput
 
+# Replay speed multiplier. 1.0 = recorded pace (default).
+# 2.0 = scale every inter-event delta to half (input + S2C in lockstep).
+# Sequence is preserved; only inter-event deltas shrink. The Mac
+# emulator's S2C pacing scales identically so server packets stay aligned
+# with input. >1.0 is best-effort: the game client itself runs in real
+# time, so animations / movement that depend on its internal clock can't
+# go faster than the client renders them.
+SPEED        ?= 1.0
+
 SSH          := ssh
 SCP          := scp
 
@@ -71,7 +80,7 @@ help:
 
 server:
 	@pkill -f 'v2_server.py' 2>/dev/null || true
-	$(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP)
+	$(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP) --speed $(SPEED)
 
 server-bg:
 	@pkill -9 -f 'v2_server.py' 2>/dev/null || true
@@ -80,7 +89,7 @@ server-bg:
 		[ -n "$$pid" ] && kill -9 $$pid 2>/dev/null || true; \
 	done
 	@sleep 0.5
-	@nohup $(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP) > /tmp/v2_server.log 2>&1 &
+	@nohup $(PYTHON) -u v2_server.py $(JSONL) --bind 0.0.0.0 --rewrite-host $(MAC_IP) --speed $(SPEED) > /tmp/v2_server.log 2>&1 &
 	@sleep 1
 	@head -10 /tmp/v2_server.log
 	@if grep -q 'Address already in use' /tmp/v2_server.log; then echo "[server-bg] FAIL: port already in use — see log"; exit 1; fi
@@ -161,7 +170,7 @@ screenshot:
 	@echo "[screenshot] -> /tmp/rc3_screen.png"
 
 input:
-	@$(SSH) $(RC3) 'powershell -NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/schedule_input.ps1 -RecordingId $(RECORDING_ID) -XCorrection $(X_CORRECTION) -YCorrection $(Y_CORRECTION) -CtrlHost $(MAC_IP) -ClickMode $(CLICK_MODE) $(if $(CV_DEBUG),-CvDebugDir "$(REPLAY_REMOTE)/cv_debug",)'
+	@$(SSH) $(RC3) 'powershell -NoProfile -ExecutionPolicy Bypass -File $(REPLAY_REMOTE)/schedule_input.ps1 -RecordingId $(RECORDING_ID) -XCorrection $(X_CORRECTION) -YCorrection $(Y_CORRECTION) -CtrlHost $(MAC_IP) -ClickMode $(CLICK_MODE) -Speed $(SPEED) $(if $(CV_DEBUG),-CvDebugDir "$(REPLAY_REMOTE)/cv_debug",)'
 
 input-stop:
 	@$(SSH) $(RC3) 'powershell -NoProfile -Command "Stop-ScheduledTask -TaskName xen-replay-input -ErrorAction SilentlyContinue; exit 0"'
