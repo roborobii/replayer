@@ -570,6 +570,23 @@ class PatchCaptureWorker(threading.Thread):
 # ---------------------------------------------------------------------------
 # Input recorder (pynput LL hooks + vmconnect foreground filter)
 
+# Mouse-move dedup. Game state only depends on click coords, so we cap
+# hover sampling at ~60 Hz AND skip sub-pixel motion. Same policy lives
+# at replay/input_replayer.py:load_jsonl so old un-deduped recordings
+# get the same treatment on load.
+_MOVE_DEDUP_MIN_INTERVAL_NS = 16_000_000  # 60 Hz
+_MOVE_DEDUP_MIN_PX = 2.0
+
+
+def _should_keep_move(t_ns, fx, fy, cw, ch, last_t_ns, last_fx, last_fy):
+    if last_t_ns == 0:
+        return True
+    if t_ns - last_t_ns >= _MOVE_DEDUP_MIN_INTERVAL_NS:
+        return True
+    return (abs(fx - last_fx) * cw >= _MOVE_DEDUP_MIN_PX
+            or abs(fy - last_fy) * ch >= _MOVE_DEDUP_MIN_PX)
+
+
 class InputRecorder:
     """Owns pynput Listeners. Emits input_*, viewport, and input_focus events.
 
@@ -584,6 +601,9 @@ class InputRecorder:
         self.stop = stop_evt
         self.gate_evt = gate_evt
         self.patch_worker = patch_worker
+        self._last_move_t_ns = 0
+        self._last_move_fx = 0.0
+        self._last_move_fy = 0.0
         # Lazy imports so the script can at least start to parse args even
         # if pynput/win32 aren't installed.
         from pynput import mouse, keyboard  # type: ignore
@@ -724,6 +744,14 @@ class InputRecorder:
         if not self._gated():
             return
         fx, fy, cw, ch, t_mono, t_wall = n
+        if not _should_keep_move(t_wall, fx, fy, cw, ch,
+                                 self._last_move_t_ns,
+                                 self._last_move_fx,
+                                 self._last_move_fy):
+            return
+        self._last_move_t_ns = t_wall
+        self._last_move_fx = fx
+        self._last_move_fy = fy
         self.writer.emit({
             "kind": "input_mouse_move",
             "t_mono_ns": t_mono, "t_wall_ns": t_wall,

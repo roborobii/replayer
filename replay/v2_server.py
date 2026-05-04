@@ -301,6 +301,10 @@ class ControlBus:
         self.sock: Optional[socket.socket] = None
         self._pending_s2c_ports: set = set()
         self._pending_lock = threading.Lock()
+        self._progress_lock = threading.Lock()
+        self._progress_cond = threading.Condition(self._progress_lock)
+        self._input_progress_seq = 0
+        self._input_done_received = False
 
     def register_pending_s2c_port(self, port: int) -> None:
         with self._pending_lock:
@@ -310,6 +314,23 @@ class ControlBus:
         with self._pending_lock:
             self._pending_s2c_ports.discard(port)
             return len(self._pending_s2c_ports) == 0
+
+    def wait_for_input_progress(self, target_seq: int, timeout_s: float = 30.0) -> bool:
+        # Block until input_replayer has reported progress past target_seq,
+        # input_done has been signaled (input drained → no more gating
+        # needed), or stop_evt fires. Returns True if progress reached or
+        # input_done; False on timeout.
+        deadline = time.monotonic() + timeout_s
+        with self._progress_cond:
+            while True:
+                if (self._input_done_received
+                        or self._input_progress_seq >= target_seq
+                        or self.stop_evt.is_set()):
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._progress_cond.wait(timeout=min(remaining, 0.5))
 
     def serve(self) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -364,10 +385,20 @@ class ControlBus:
                     obj = json.loads(line.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
+                if obj.get("event") == "input_progress":
+                    seq = obj.get("seq", 0)
+                    with self._progress_cond:
+                        if seq > self._input_progress_seq:
+                            self._input_progress_seq = seq
+                            self._progress_cond.notify_all()
+                    continue
                 if obj.get("event") == "input_done":
                     print(f"[ctrl] input_done from {addr[0]}:{addr[1]}; "
                           f"emulator stays up for live play (use 'make kill' to stop)",
                           file=sys.stderr, flush=True)
+                    with self._progress_cond:
+                        self._input_done_received = True
+                        self._progress_cond.notify_all()
         with self.lock:
             if conn in self.clients:
                 self.clients.remove(conn)
@@ -461,6 +492,8 @@ def handle_world_conn(sock: socket.socket, addr, port: int, queue: List[dict],
             log(f"[pace] world S2C: {len(s2c_recs)} frames spanning {rec_span_s:.1f}s (rec) starting playback")
         sent = 0
         speed = float(CFG.get("speed", 1.0)) or 1.0
+        lookahead = int(CFG.get("world_lookahead_seq", 100))
+        gate_timeout = float(CFG.get("world_gate_timeout_s", 30.0))
         for rec in s2c_recs:
             if stop.is_set():
                 return
@@ -468,6 +501,12 @@ def handle_world_conn(sock: socket.socket, addr, port: int, queue: List[dict],
                 target = play_t0 + int((rec["t_ns"] - rec_t0) / speed)
                 if not _paced_sleep(target, stop):
                     return
+            rec_seq = rec.get("seq")
+            if rec_seq is not None:
+                target_seq = rec_seq - lookahead
+                if not ctrl.wait_for_input_progress(target_seq, gate_timeout):
+                    log(f"[gate] timeout waiting for input progress >= {target_seq} "
+                        f"(current S2C seq={rec_seq}); pushing anyway")
             try:
                 plain = bytes.fromhex(rec["payload_hex"])
             except ValueError:
@@ -596,9 +635,18 @@ def main() -> int:
                          "deliver server packets twice as fast; pair with "
                          "the replayer's --speed so input + network stay "
                          "synchronized.")
+    ap.add_argument("--world-lookahead-seq", type=int, default=100,
+                    help="how many recorded events the world S2C pusher may "
+                         "lead the input replayer by. S2C with seq=N waits "
+                         "until input_progress reaches N-lookahead.")
+    ap.add_argument("--world-gate-timeout-s", type=float, default=30.0,
+                    help="if input progress stalls this long, push the next "
+                         "S2C anyway (prevents deadlock if replayer dies).")
     args = ap.parse_args()
     CFG["pace"] = not args.no_pace
     CFG["speed"] = float(args.speed) or 1.0
+    CFG["world_lookahead_seq"] = int(args.world_lookahead_seq)
+    CFG["world_gate_timeout_s"] = float(args.world_gate_timeout_s)
 
     if not os.path.isfile(args.recording):
         print(f"recording not found: {args.recording}", file=sys.stderr)

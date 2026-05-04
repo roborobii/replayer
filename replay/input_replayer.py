@@ -567,17 +567,53 @@ def post_click(hwnd: int, btn: str, state: str, cx: int, cy: int) -> None:
 # ---------------------------------------------------------------------------
 # Recording
 
+# Mouse-move dedup policy mirrors recorder/host_recording_stream_v2.py.
+# Applied on load so old un-deduped recordings replay efficiently.
+_MOVE_DEDUP_MIN_INTERVAL_NS = 16_000_000  # 60 Hz
+_MOVE_DEDUP_MIN_PX = 2.0
+
+
+def _should_keep_move(t_ns, fx, fy, cw, ch, last_t_ns, last_fx, last_fy):
+    if last_t_ns == 0:
+        return True
+    if t_ns - last_t_ns >= _MOVE_DEDUP_MIN_INTERVAL_NS:
+        return True
+    return (abs(fx - last_fx) * cw >= _MOVE_DEDUP_MIN_PX
+            or abs(fy - last_fy) * ch >= _MOVE_DEDUP_MIN_PX)
+
+
 def load_jsonl(path: str) -> List[dict]:
     out: List[dict] = []
+    last_t_ns = 0
+    last_fx = 0.0
+    last_fy = 0.0
+    moves_in = 0
+    moves_kept = 0
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
+                ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if ev.get("kind") == "input_mouse_move":
+                moves_in += 1
+                t_ns = ev.get("t_wall_ns", 0)
+                fx = ev.get("fx", 0.0)
+                fy = ev.get("fy", 0.0)
+                cw = ev.get("cw", 1) or 1
+                ch = ev.get("ch", 1) or 1
+                if not _should_keep_move(t_ns, fx, fy, cw, ch,
+                                         last_t_ns, last_fx, last_fy):
+                    continue
+                last_t_ns, last_fx, last_fy = t_ns, fx, fy
+                moves_kept += 1
+            out.append(ev)
+    if moves_in:
+        print(f"[load] mouse_move dedup: kept {moves_kept}/{moves_in} "
+              f"({100*moves_kept/moves_in:.1f}%)", file=sys.stderr)
     return out
 
 
@@ -660,6 +696,10 @@ def _net_key(ev: dict):
     return ev.get("seq")
 
 
+_ctrl_send_sock: Optional["socket.socket"] = None
+_ctrl_send_lock = threading.Lock()
+
+
 def _ctrl_send_event(ctrl_addr, obj) -> None:
     import socket as _s
     try:
@@ -673,10 +713,27 @@ def _ctrl_send_event(ctrl_addr, obj) -> None:
         print(f"[ctrl] failed to send {obj}: {e}", file=sys.stderr)
 
 
+def _ctrl_send_progress(seq) -> None:
+    # Reuse the persistent listener socket to avoid TCP connect-per-event
+    # at hundreds of events/sec.
+    if seq is None:
+        return
+    with _ctrl_send_lock:
+        s = _ctrl_send_sock
+        if s is None:
+            return
+        try:
+            s.sendall((json.dumps({"event": "input_progress", "seq": seq})
+                       + "\n").encode("utf-8"))
+        except OSError:
+            pass
+
+
 def _ctrl_listener(ctrl_addr, ack_fn, stop_flag: List[bool]):
     """Background thread: connect to emulator's control bus and ack each
     {seq,port,dir,opcode} JSON line."""
     import socket as _s
+    global _ctrl_send_sock
     while not stop_flag[0]:
         try:
             s = _s.create_connection(ctrl_addr, timeout=5)
@@ -685,6 +742,8 @@ def _ctrl_listener(ctrl_addr, ack_fn, stop_flag: List[bool]):
             time.sleep(1.0)
             continue
         print(f"[ctrl] connected {ctrl_addr}", file=sys.stderr)
+        with _ctrl_send_lock:
+            _ctrl_send_sock = s
         buf = b""
         s.settimeout(0.5)
         while not stop_flag[0]:
@@ -707,6 +766,8 @@ def _ctrl_listener(ctrl_addr, ack_fn, stop_flag: List[bool]):
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
                 ack_fn(obj)
+        with _ctrl_send_lock:
+            _ctrl_send_sock = None
         try: s.close()
         except OSError: pass
         print("[ctrl] disconnected; retry", file=sys.stderr)
@@ -881,6 +942,8 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
             print("[replay] stop flag set", file=sys.stderr)
             return
         seq = ev.get("seq")
+        if seq is not None:
+            _ctrl_send_progress(seq)
         if stop_at_seq is not None and seq is not None and seq > stop_at_seq:
             print(f"[replay] reached stop-at-seq={stop_at_seq}; handing off "
                   f"to human. Emulator stays up.", file=sys.stderr)
