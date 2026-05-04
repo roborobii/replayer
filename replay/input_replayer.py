@@ -787,6 +787,13 @@ def replay(events: List[dict], start_idx: int, vm_w: int, vm_h: int,
             stop_flag[0] = True
             ack_event.set()
             return
+        if obj.get("event") == "recording_done":
+            print(f"[ctrl] recording_done from emulator port={obj.get('port')} "
+                  f"sent={obj.get('sent')}; dropping queued inputs, handing off "
+                  f"to live play", file=sys.stderr)
+            stop_flag[0] = True
+            ack_event.set()
+            return
         seq = obj.get("seq")
         with ack_lock:
             acked_seqs.add(seq)

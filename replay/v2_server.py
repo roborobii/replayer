@@ -299,6 +299,17 @@ class ControlBus:
         self.lock = threading.Lock()
         self.clients: List[socket.socket] = []
         self.sock: Optional[socket.socket] = None
+        self._pending_s2c_ports: set = set()
+        self._pending_lock = threading.Lock()
+
+    def register_pending_s2c_port(self, port: int) -> None:
+        with self._pending_lock:
+            self._pending_s2c_ports.add(port)
+
+    def mark_s2c_port_done(self, port: int) -> bool:
+        with self._pending_lock:
+            self._pending_s2c_ports.discard(port)
+            return len(self._pending_s2c_ports) == 0
 
     def serve(self) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -354,9 +365,9 @@ class ControlBus:
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
                 if obj.get("event") == "input_done":
-                    print(f"[ctrl] input_done received from {addr[0]}:{addr[1]}; "
-                          f"shutting down", file=sys.stderr, flush=True)
-                    self.stop_evt.set()
+                    print(f"[ctrl] input_done from {addr[0]}:{addr[1]}; "
+                          f"emulator stays up for live play (use 'make kill' to stop)",
+                          file=sys.stderr, flush=True)
         with self.lock:
             if conn in self.clients:
                 self.clients.remove(conn)
@@ -370,6 +381,11 @@ class ControlBus:
     def broadcast_desync(self, seq, port, got_op, want_op) -> None:
         self._send({"event": "desync", "seq": seq, "port": port,
                     "got_op": got_op, "want_op": want_op})
+
+    def broadcast_event(self, event: str, **kwargs) -> None:
+        payload = {"event": event}
+        payload.update(kwargs)
+        self._send(payload)
 
     def _send(self, obj) -> None:
         data = (json.dumps(obj) + "\n").encode("utf-8")
@@ -469,6 +485,8 @@ def handle_world_conn(sock: socket.socket, addr, port: int, queue: List[dict],
             log(f"[pace] world S2C: pushed {sent} frames in {elapsed_s:.1f}s (rec was {rec_span_s:.1f}s)")
         else:
             log(f"world: pushed {sent} S2C frames")
+        if sent > 0 and ctrl.mark_s2c_port_done(port):
+            ctrl.broadcast_event("recording_done", port=port, sent=sent)
 
     pusher = threading.Thread(target=_push_s2c, daemon=True, name=f"world-push-{port}")
     pusher.start()
@@ -590,10 +608,21 @@ def main() -> int:
     print(f"loaded {sum(len(v) for v in by_port.values())} net events "
           f"across ports {sorted(by_port.keys())}", file=sys.stderr, flush=True)
 
+    all_t = [r["t_ns"] for q in by_port.values() for r in q
+             if r.get("t_ns") is not None]
+    rec_dur_s = (max(all_t) - min(all_t)) / 1e9 if all_t else 0.0
+    expected_s = rec_dur_s / max(CFG["speed"], 0.001)
+    print(f"[timer] recording={rec_dur_s:.1f}s; at speed={CFG['speed']} "
+          f"expected={expected_s:.1f}s", file=sys.stderr, flush=True)
+    t_start = time.monotonic()
+
     ports = [int(p.strip()) for p in args.ports.split(",") if p.strip()]
     stop_evt = threading.Event()
 
     ctrl = ControlBus(args.bind, args.ctrl_port, stop_evt)
+    for p, q in by_port.items():
+        if p in (18123, 18124) and any(r["dir"] == "S2C" for r in q):
+            ctrl.register_pending_s2c_port(p)
     ctrl_thread = threading.Thread(target=ctrl.serve, daemon=True, name="ctrl")
     ctrl_thread.start()
 
@@ -651,6 +680,10 @@ def main() -> int:
 
     for lis in listeners:
         lis.join(timeout=2.0)
+    elapsed = time.monotonic() - t_start
+    diff = elapsed - expected_s
+    print(f"[timer] elapsed={elapsed:.1f}s (expected={expected_s:.1f}s, "
+          f"diff={diff:+.1f}s)", file=sys.stderr, flush=True)
     print("[main] done", file=sys.stderr, flush=True)
     return 0
 
