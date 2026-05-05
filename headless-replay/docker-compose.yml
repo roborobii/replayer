@@ -1,0 +1,79 @@
+services:
+  replay-server:
+    build:
+      context: ./server
+    container_name: replay-server
+    restart: "no"
+    environment:
+      RECORDING_ID: "${RECORDING_ID:-}"
+      SPEED: "${SPEED:-1.0}"
+      REWRITE_HOST: "${REWRITE_HOST:-10.42.0.10}"
+      SWAP_WITH_CHARACTER: "${SWAP_WITH_CHARACTER:-}"
+    volumes:
+      - ../sessions:/sessions:ro
+    ports:
+      - "127.0.0.1:1818:1818"
+      - "127.0.0.1:1819:1819"
+      - "127.0.0.1:18123:18123"
+      - "127.0.0.1:18124:18124"
+    networks:
+      replay-net:
+        ipv4_address: 10.42.0.10
+
+  wine-client:
+    build:
+      context: ./client
+    container_name: wine-client
+    platform: linux/amd64
+    restart: "no"
+    depends_on:
+      - replay-server
+    environment:
+      RECORDING_ID: "${RECORDING_ID:-}"
+      SPEED: "${SPEED:-1.0}"
+      LOGIN_SLOT: "${LOGIN_SLOT:-0}"
+      SKIP_LOGIN: "${SKIP_LOGIN:-}"
+      INJECT_DELAY: "${INJECT_DELAY:-12}"
+      TOKEN: "${TOKEN:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
+      WINEDEBUG: "${WINEDEBUG:--all}"
+    volumes:
+      - ../wine-replay/client:/game:ro
+      - ../wine-replay/dll:/dll:ro
+      - ../sessions:/sessions:ro
+      - wineprefix:/wine
+    networks:
+      replay-net:
+        ipv4_address: 10.42.0.20
+
+  # Unicorn-based code-path tracer for DXRender.exe.
+  # Pure x86 emulation, runs natively on arm64 — no wine, no network needed.
+  # Only spun up via the `tracer` profile: `docker compose --profile tracer up tracer`.
+  tracer:
+    profiles: [tracer]
+    build: ./tracer
+    container_name: tracer
+    restart: "no"
+    environment:
+      FN_VA: "${FN_VA:-0x000EF6D8}"
+      RECORDING_ID: "${RECORDING_ID:-}"
+      SELF_PTR: "${SELF_PTR:-}"
+      FLAGS: "${FLAGS:-}"
+      XY_PACKED: "${XY_PACKED:-}"
+      BTN: "${BTN:-1}"
+      TRACE_NAME: "${TRACE_NAME:-trace}"
+    volumes:
+      - ../wine-replay/client:/game:ro
+      - ../sessions:/sessions:ro
+      - ../traces:/traces
+
+networks:
+  replay-net:
+    driver: bridge
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.42.0.0/24
+
+volumes:
+  wineprefix:

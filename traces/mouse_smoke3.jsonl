@@ -1,0 +1,6 @@
+{"event": "pe_loaded", "image_base": "0x10000", "image_size": "0x23e000", "entry_va": "0x1b8f28", "ts": 0.158845}
+{"event": "call_setup", "fn_va": "0xef6d8", "self_ptr": "0x206784", "flags": "0x8", "xy_packed": "0x640032", "btn": 1, "esp": "0x400ffef8", "fake_ret": "0xcafefeed", "ts": 0.161122}
+{"event": "block", "n": 1, "va": "0xef6d8", "size": 27, "first_seen": true, "ts": 0.161351}
+{"event": "mem_invalid", "access": 19, "addr": "0x8", "size": 4, "value": "0x0", "eip": "0xef6e9", "ts": 0.161422}
+{"event": "uc_error", "err": "Invalid memory read (UC_ERR_READ_UNMAPPED)", "eip": "0xef6e9", "ts": 0.161615}
+{"event": "done", "blocks_total": 1, "blocks_unique": 1, "eip_final": "0xef6e9", "eax_final": "0x0", "ts": 0.161649}
